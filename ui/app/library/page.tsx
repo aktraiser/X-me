@@ -11,6 +11,7 @@ export interface Chat {
   title: string;
   createdAt: string;
   focusMode: string;
+  content: string;
 }
 
 const Page = () => {
@@ -29,6 +30,8 @@ const Page = () => {
       });
 
       const data = await res.json();
+      console.log('Données reçues de l\'API:', data);
+      console.log('Premier chat:', data.chats[0]);
 
       setChats(data.chats);
       setLoading(false);
@@ -90,6 +93,9 @@ const Page = () => {
               >
                 {chat.title}
               </Link>
+              <p className="text-sm text-black/60 dark:text-white/60 line-clamp-2">
+                {chat.content}
+              </p>
               <div className="flex flex-row items-center justify-between w-full">
                 <div className="flex flex-row items-center space-x-1 lg:space-x-1.5 text-black/70 dark:text-white/70">
                   <ClockIcon size={15} />

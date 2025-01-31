@@ -13,6 +13,7 @@ export interface Expert {
   created_at: string;
   image_url: string;
   avatar_url?: string;
+  url: string;
 }
 
 export interface Location {

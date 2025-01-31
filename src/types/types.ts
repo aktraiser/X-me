@@ -15,6 +15,7 @@ export interface Expert {
   services: any;
   created_at: string;
   image_url: string;
+  url:string;
 }
 
 export interface ExpertSearchRequest {
@@ -40,6 +41,7 @@ export interface Source {
   title: string;
   url: string;
   snippet: string;
+  number?: number;
 }
 
 export interface ImageResult {
@@ -70,4 +72,24 @@ export interface NormalizedSource {
 export interface SearchResult {
   pageContent: string;
   metadata: DocumentMetadata;
+}
+
+export interface ProcessedDocs {
+  content: string;
+  sources: Source[];
+}
+
+export interface Message {
+  content: string;
+  role: string;
+}
+
+export interface Chat {
+  id: string;
+  title: string;
+  createdAt: string;
+  focusMode: string;
+  files: File[];
+  messages?: Message[];
+  content?: string;
 }

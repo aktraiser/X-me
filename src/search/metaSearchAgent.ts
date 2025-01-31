@@ -285,19 +285,10 @@ export class MetaSearchAgent implements MetaSearchAgentType {
           if (this.config.searchDatabase) {
             try {
               console.log('👥 Recherche d\'experts...');
-              const expertResults = await handleExpertSearch(
-                {
-                  query: input.query,
-                  chat_history: input.chat_history,
-                  messageId: 'search_' + Date.now(),
-                  chatId: 'chat_' + Date.now()
-                },
-                llm
-              );
+              const expertResults = await this.searchExperts(input.query, embeddings, llm);
 
-              if (expertResults.experts.length > 0) {
-                const expertDocs = this.convertExpertsToDocuments(expertResults.experts);
-                docs = [...docs, ...expertDocs];
+              if (expertResults.length > 0) {
+                docs = [...docs, ...expertResults];
               }
             } catch (error) {
               console.error('❌ Erreur lors de la recherche d\'experts:', error);
@@ -391,25 +382,91 @@ export class MetaSearchAgent implements MetaSearchAgentType {
   }
 
   private processDocs(docs: Document[]) {
-    // Trier les documents par score si disponible
-    const sortedDocs = docs.sort(
-      (a, b) => (b.metadata?.score || 0) - (a.metadata?.score || 0)
-    );
+    console.log(`🔍 Traitement de ${docs.length} documents...`);
+    if (docs.length === 0) {
+      console.log('⚠️ Aucun document à traiter');
+      return "Aucun document pertinent trouvé.";
+    }
 
-    // Limiter à 5 documents maximum
-    const limitedDocs = sortedDocs.slice(0, 5);
+    // Trier les documents par score et type (priorité aux documents sectoriels)
+    const sortedDocs = docs.sort((a, b) => {
+      // Priorité aux documents sectoriels
+      if (a.metadata?.type === 'sector' && b.metadata?.type !== 'sector') return -1;
+      if (a.metadata?.type !== 'sector' && b.metadata?.type === 'sector') return 1;
+      // Puis par score
+      return (b.metadata?.score || 0) - (a.metadata?.score || 0);
+    });
 
-    // Limiter la taille de chaque document à 1000 caractères
-    return limitedDocs
+    // Augmenter la limite à 10 documents
+    const limitedDocs = sortedDocs.slice(0, 10);
+
+    const processedDocs = limitedDocs
       .map((doc, index) => {
-        const content =
-          doc.pageContent.length > 1000
-            ? doc.pageContent.substring(0, 1000) + '...'
-            : doc.pageContent;
+        // Améliorer l'identification de la source
+        const source = this.formatSource(doc);
+        
+        // Extraire les informations clés
+        const keyInfo = this.extractKeyInfo(doc.pageContent);
+        
+        // Formater le contenu avec une meilleure structure
+        const content = this.formatContent(doc.pageContent);
 
-        return `${content} [${index + 1}]`;
+        return `=== Source ${index + 1}: ${source} ===\n${keyInfo}\n${content}\n`;
       })
       .join('\n\n');
+    
+    console.log(`✅ ${limitedDocs.length} documents traités et formatés`);
+    return processedDocs;
+  }
+
+  private formatSource(doc: Document): string {
+    const type = doc.metadata?.type || 'unknown';
+    const title = doc.metadata?.title || 'Sans titre';
+    const source = doc.metadata?.source || '';
+    const subsector = doc.metadata?.subsector || '';
+    
+    switch (type) {
+      case 'sector':
+        return `[Document Sectoriel: ${title}${subsector ? ` - ${subsector}` : ''}]`;
+      case 'web':
+        return `[Source Web: ${title}]`;
+      default:
+        return `[${title}${source ? ` - ${source}` : ''}]`;
+    }
+  }
+
+  private extractKeyInfo(content: string): string {
+    // Extraire les informations clés (chiffres, dates, statistiques)
+    const keyPatterns = [
+      /\d+(?:,\d+)?(?:\s*%|\s*euros?|\s*€)/g,  // Chiffres avec unités
+      /\d{4}/g,  // Années
+      /\d+(?:,\d+)?\s*(?:millions?|milliards?)/g  // Grands nombres
+    ];
+
+    const keyInfo = keyPatterns
+      .map(pattern => {
+        const matches = content.match(pattern);
+        return matches ? matches.slice(0, 5) : [];  // Limiter à 5 matches par pattern
+      })
+      .flat()
+      .filter((v, i, a) => a.indexOf(v) === i)  // Dédupliquer
+      .join(', ');
+
+    return keyInfo ? `Informations clés: ${keyInfo}` : '';
+  }
+
+  private formatContent(content: string): string {
+    // Limiter la taille et améliorer la lisibilité
+    const maxLength = 1500;
+    const truncated = content.length > maxLength 
+      ? content.substring(0, maxLength) + '...'
+      : content;
+
+    // Nettoyer et structurer le contenu
+    return truncated
+      .replace(/\n{3,}/g, '\n\n')  // Réduire les espaces multiples
+      .replace(/\s{2,}/g, ' ')     // Nettoyer les espaces
+      .trim();
   }
 
   private async handleStream(
@@ -438,7 +495,7 @@ export class MetaSearchAgent implements MetaSearchAgentType {
               console.log(`🔍 Construction URL pour source ${sourceId} - Page ${page}`, source.metadata);
               url = `/api/uploads/${sourceId}/content?page=${page}`;
             } else if (isExpert) {
-              url = source.metadata?.url;
+              url = source.metadata?.expertData?.url || source.metadata?.url;
             } else if (isWeb) {
               url = source.metadata?.url;
               console.log('🌐 Source web trouvée:', {
@@ -580,7 +637,7 @@ export class MetaSearchAgent implements MetaSearchAgentType {
             if (isUploadedDoc && sourceId) {
               url = `/api/uploads/${sourceId}/content?page=${pageNumber}`;
             } else if (isExpert) {
-              url = source.metadata?.url;
+              url = source.metadata?.expertData?.url || source.metadata?.url;
             } else if (source.metadata?.type === 'web') {
               url = source.metadata?.url;
             }
@@ -643,9 +700,10 @@ export class MetaSearchAgent implements MetaSearchAgentType {
   ): Promise<SearchResult[]> {
     try {
       console.log('👥 Recherche d\'experts pour:', query);
+      const cleanQuery = query.replace(/[%']/g, ' ').trim();
       const expertResults = await handleExpertSearch(
         {
-          query,
+          query: cleanQuery,
           chat_history: [],
           messageId: 'search_' + Date.now(),
           chatId: 'chat_' + Date.now()
@@ -666,13 +724,32 @@ export class MetaSearchAgent implements MetaSearchAgentType {
           expert: true,
           expertData: expert,
           title: `${expert.prenom} ${expert.nom} - ${expert.specialite}`,
-          url: `/expert/${expert.id_expert}`,
+          url: expert.url,
           image_url: expert.image_url,
-          score: 0.6 // Score moyen pour les experts
+          score: 0.6
         }
       }));
     } catch (error) {
       console.error('❌ Erreur lors de la recherche d\'experts:', error);
+      return [];
+    }
+  }
+
+  private async handleImageSearch(query: string, llm: BaseChatModel) {
+    try {
+      const results = await handleImageSearch(
+        { query, chat_history: [] },
+        llm
+      );
+
+      if (!results || !Array.isArray(results)) {
+        console.warn('⚠️ Résultat de recherche d\'images invalide');
+        return [];
+      }
+
+      return results;
+    } catch (error) {
+      console.error('❌ Erreur lors de la recherche d\'images:', error);
       return [];
     }
   }
@@ -701,6 +778,55 @@ export class MetaSearchAgent implements MetaSearchAgentType {
     }
   }
 
+  private async parallelSearchOperations(
+    query: string,
+    llm: BaseChatModel,
+    embeddings: Embeddings,
+    optimizationMode: 'speed' | 'balanced' | 'quality'
+  ): Promise<{
+    images: any[];
+    experts: SearchResult[];
+    webResults: SearchResult[];
+  }> {
+    console.log('🔄 Démarrage des recherches parallèles');
+    
+    const searchTasks = {
+      images: optimizationMode === 'balanced' || optimizationMode === 'quality'
+        ? this.handleImageSearch(query, llm).catch(error => {
+            console.error('❌ Erreur recherche images:', error);
+            return [];
+          })
+        : Promise.resolve([]),
+        
+      experts: this.config.searchDatabase
+        ? this.searchExperts(query, embeddings, llm).catch(error => {
+            console.error('❌ Erreur recherche experts:', error);
+            return [];
+          })
+        : Promise.resolve([]),
+        
+      webResults: this.config.searchWeb
+        ? this.searchWeb(query).catch(error => {
+            console.error('❌ Erreur recherche web:', error);
+            return [];
+          })
+        : Promise.resolve([])
+    };
+
+    const [images, experts, webResults] = await Promise.all([
+      searchTasks.images,
+      searchTasks.experts,
+      searchTasks.webResults
+    ]);
+
+    console.log('✅ Recherches parallèles terminées');
+    console.log('🔍 Images trouvées:', images?.length);
+    console.log('👥 Experts trouvés:', experts.length);
+    console.log('🌐 Résultats web:', webResults.length);
+
+    return { images, experts, webResults };
+  }
+
   private async rerankDocs(
     query: string,
     docs: Document[],
@@ -712,48 +838,62 @@ export class MetaSearchAgent implements MetaSearchAgentType {
     console.log('🔍 Mode d\'optimisation:', optimizationMode);
     console.log('🔍 Query pour la recherche d\'image:', query);
 
-    if (optimizationMode === 'balanced' || optimizationMode === 'quality') {
-      console.log('🔍 Démarrage de la recherche d\'images...');
-      try {
-        console.log('🔍 Appel de handleImageSearch avec la query:', query);
-        const images = await handleImageSearch(
-          {
-            query,
-            chat_history: [],
-          },
-          llm
-        );
-        console.log('🔍 Résultat brut de handleImageSearch:', JSON.stringify(images, null, 2));
-        console.log('🔍 Images trouvées:', images?.length);
+    const { images, experts, webResults } = await this.parallelSearchOperations(
+      query,
+      llm,
+      embeddings,
+      optimizationMode
+    );
 
-        if (images && images.length > 0) {
-          console.log('🔍 Première image trouvée:', {
-            src: images[0].img_src,
-            title: images[0].title,
-            url: images[0].url
-          });
-          return docs.slice(0, 15).map(doc => ({
-            ...doc,
-            metadata: {
-              ...doc.metadata,
-              illustrationImage: images[0].img_src,
-              imageTitle: images[0].title
-            }
-          }));
-        } else {
-          console.log('⚠️ Aucune image trouvée dans le résultat');
+    let enrichedDocs = docs;
+    if (images && images.length > 0) {
+      console.log('🔍 Première image trouvée:', {
+        src: images[0].img_src,
+        title: images[0].title,
+        url: images[0].url
+      });
+      enrichedDocs = docs.map(doc => ({
+        ...doc,
+        metadata: {
+          ...doc.metadata,
+          illustrationImage: images[0].img_src,
+          imageTitle: images[0].title
         }
-      } catch (error) {
-        console.error('❌ Erreur détaillée lors de la recherche d\'image:', {
-          message: error.message,
-          stack: error.stack
-        });
-      }
-    } else {
-      console.log('🔍 Mode speed: pas de recherche d\'images');
+      }));
     }
 
-    return docs.slice(0, 15);
+    return [
+      ...enrichedDocs,
+      ...experts,
+      ...webResults
+    ].slice(0, 15);
+  }
+
+  private async parallelDocumentProcessing(
+    docs: Document[],
+    embeddings: Embeddings,
+    ragChain: RAGDocumentChain,
+    message: string
+  ): Promise<{
+    vectorStore: any;
+    relevantDocs: Document[];
+  }> {
+    console.log('📚 Démarrage traitement parallèle des documents');
+    
+    const initPromise = !ragChain.isInitialized()
+      ? ragChain.initializeVectorStoreFromDocuments(docs, embeddings)
+      : Promise.resolve(null);
+
+    const [vectorStoreInit, relevantDocsSearch] = await Promise.all([
+      initPromise,
+      ragChain.searchSimilarDocuments(message, 5)
+    ]);
+
+    console.log('✅ Traitement parallèle des documents terminé');
+    return {
+      vectorStore: vectorStoreInit,
+      relevantDocs: relevantDocsSearch
+    };
   }
 
   async searchAndAnswer(
@@ -768,63 +908,58 @@ export class MetaSearchAgent implements MetaSearchAgentType {
     const emitter = new eventEmitter();
 
     try {
-      // Ajouter le message utilisateur à la mémoire
       this.updateMemory(new HumanMessage(message));
-
-      // Fusionner l'historique
       const mergedHistory: BaseMessage[] = [
         ...this.conversationHistory,
         ...history,
       ];
 
-      // Analyse sophistiquée de la requête avec LLM
-      const queryAnalysis = await llm.invoke(`En tant qu'expert en analyse de requêtes, examine cette demande et détermine la stratégie de recherche optimale.
+      // Lancement parallèle de l'analyse et du chargement des documents
+      console.log('🔄 Démarrage des opérations parallèles initiales');
+      const [analysis, uploadedDocs] = await Promise.all([
+        llm.invoke(`En tant qu'expert en analyse de requêtes...`).catch(error => ({
+          content: JSON.stringify({
+            primaryIntent: "HYBRID",
+            requiresDocumentSearch: fileIds.length > 0,
+            requiresWebSearch: true,
+            requiresExpertSearch: true,
+            documentRelevance: 0.8,
+            reasoning: "Analyse par défaut suite à une erreur"
+          })
+        })),
+        this.loadUploadedDocuments(fileIds)
+      ]);
 
-Question/Requête: "${message}"
-
-Documents disponibles: ${fileIds.length > 0 ? 'Oui' : 'Non'}
-
-Analyse et réponds au format JSON:
-{
-  "primaryIntent": "DOCUMENT_QUERY" | "WEB_SEARCH" | "EXPERT_ADVICE" | "HYBRID",
-  "requiresDocumentSearch": <boolean>,
-  "requiresWebSearch": <boolean>,
-  "requiresExpertSearch": <boolean>,
-  "documentRelevance": <0.0 à 1.0>,
-  "reasoning": "<courte explication>"
-}
-
-Critères d'analyse:
-- DOCUMENT_QUERY: La question porte spécifiquement sur le contenu des documents
-- WEB_SEARCH: Recherche d'informations générales ou actuelles
-- EXPERT_ADVICE: Demande nécessitant une expertise spécifique
-- HYBRID: Combinaison de plusieurs sources
-
-Prends en compte:
-- La présence ou non de documents uploadés
-- La spécificité de la question
-- Le besoin d'expertise externe
-- L'actualité du sujet`);
-
-      const analysis = JSON.parse(String(queryAnalysis.content));
-      console.log('🎯 Analyse de la requête:', analysis);
-
-      // 1. Analyse des documents uploadés avec RAG
-      const uploadedDocs = await this.loadUploadedDocuments(fileIds);
       console.log('📚 Documents uploadés chargés:', uploadedDocs.length);
 
       if (uploadedDocs.length > 0) {
         try {
-          const ragChain = RAGDocumentChain.getInstance();
-          
-          if (!ragChain.isInitialized()) {
-            console.log('🔄 Initialisation du vector store...');
-            await ragChain.initializeVectorStoreFromDocuments(uploadedDocs, embeddings);
-          } else {
-            console.log('✅ Vector store déjà initialisé');
+          // On parse l'analyse et le message seulement si on a des documents
+          const parsedAnalysis = typeof analysis.content === 'string' 
+            ? JSON.parse(analysis.content)
+            : analysis;
+          console.log('🎯 Analyse de la requête:', parsedAnalysis);
+
+          let messageData = null;
+          if (message.trim().startsWith('{') && message.trim().endsWith('}')) {
+            try {
+              messageData = JSON.parse(message);
+              console.log('✅ Message JSON détecté et parsé:', messageData);
+            } catch (error) {
+              console.log('📝 Message traité comme texte simple (parsing JSON échoué)');
+            }
           }
 
-          const relevantDocs = await ragChain.searchSimilarDocuments(message, 5);
+          const ragChain = RAGDocumentChain.getInstance();
+          
+          // Traitement parallèle des documents avec le message original
+          const { vectorStore, relevantDocs } = await this.parallelDocumentProcessing(
+            uploadedDocs,
+            embeddings,
+            ragChain,
+            messageData?.query || message // Utiliser query du JSON si disponible, sinon message original
+          );
+
           console.log('📄 Documents pertinents trouvés:', relevantDocs.length);
 
           const documentContext = relevantDocs
@@ -833,31 +968,15 @@ Prends en compte:
             .substring(0, 500);
 
           const documentTitle = uploadedDocs[0]?.metadata?.title || '';
-          const enrichedQuery = `${message} ${documentTitle} ${documentContext}`;
+          const enrichedQuery = messageData?.query || `${message} ${documentTitle} ${documentContext}`;
 
-          // Recherche web si nécessaire
-          let webResults = [];
-          if (analysis.requiresWebSearch) {
-            console.log('🔍 Démarrage de la recherche web...');
-            const res = await searchSearxng(enrichedQuery, {
-              language: 'fr',
-              engines: this.config.activeEngines,
-            });
-
-            webResults = res.results.map(result =>
-              new Document({
-                pageContent: result.content,
-                metadata: {
-                  title: result.title,
-                  url: result.url,
-                  type: 'web',
-                  source: 'web',
-                  ...(result.img_src && { img_src: result.img_src }),
-                },
-              })
-            );
-            console.log('🌐 Résultats web trouvés:', webResults.length);
-          }
+          // Lancement parallèle des recherches avec la query enrichie
+          const searchResults = await this.parallelSearchOperations(
+            enrichedQuery,
+            llm,
+            embeddings,
+            effectiveMode
+          );
 
           // Combinaison des résultats
           const combinedResults = [
@@ -868,13 +987,13 @@ Prends en compte:
                 type: doc.metadata.type || 'uploaded'
               }
             })),
-            ...webResults
+            ...searchResults.webResults
           ];
 
           console.log('🔄 Résultats combinés:', {
             total: combinedResults.length,
             uploaded: relevantDocs.length,
-            web: webResults.length,
+            web: searchResults.webResults.length,
             types: combinedResults.map(doc => doc.metadata.type)
           });
 

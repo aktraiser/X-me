@@ -86,7 +86,7 @@ const LegalSearch = ({
         >
           <div className="flex flex-row items-center space-x-2">
             <BookCopy size={17} />
-            <p>Rechercher des textes légaux</p>
+            <p>Textes légaux</p>
           </div>
           <PlusIcon className="text-[#24A0ED]" size={17} />
         </button>

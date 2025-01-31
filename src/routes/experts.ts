@@ -1,12 +1,11 @@
 import express from 'express';
-import handleExpertSearch from '../chains/expertSearchAgent';
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { getAvailableChatModelProviders } from '../lib/providers';
-import { HumanMessage, AIMessage } from '@langchain/core/messages';
+import { HumanMessage, AIMessage, BaseMessage } from '@langchain/core/messages';
 import logger from '../utils/logger';
 import { ChatOpenAI } from '@langchain/openai';
+import handleExpertSearch from '../chains/expertSearchAgent';
 import { ExpertSearchRequest } from '../types/types';
-import crypto from 'crypto';
 
 const router = express.Router();
 
@@ -17,26 +16,26 @@ interface ChatModel {
   customOpenAIKey?: string;
 }
 
-interface ExpertSearchBody {
-  query: string;
-  chatHistory: any[];
+interface ExpertsBody {
+  chatHistory: Array<{
+    role: 'user' | 'assistant';
+    content: string;
+  }>;
   chatModel?: ChatModel;
 }
 
 router.post('/', async (req, res) => {
   try {
-    const body: ExpertSearchBody = req.body;
+    let body: ExpertsBody = req.body;
 
-    // Conversion de l'historique du chat
-    const chatHistory = body.chatHistory.map((msg: any) => {
+    const chatHistory: BaseMessage[] = body.chatHistory.map((msg) => {
       if (msg.role === 'user') {
         return new HumanMessage(msg.content);
-      } else if (msg.role === 'assistant') {
+      } else {
         return new AIMessage(msg.content);
       }
     });
 
-    // Configuration du modèle LLM
     const chatModelProviders = await getAvailableChatModelProviders();
 
     const chatModelProvider =
@@ -69,45 +68,128 @@ router.post('/', async (req, res) => {
       chatModelProviders[chatModelProvider] &&
       chatModelProviders[chatModelProvider][chatModel]
     ) {
-      llm = chatModelProviders[chatModelProvider][chatModel]
-        .model as unknown as BaseChatModel | undefined;
+      llm = chatModelProviders[chatModelProvider][chatModel].model;
     }
 
     if (!llm) {
       return res.status(400).json({ message: 'Invalid model selected' });
     }
 
-    // Génération des IDs uniques
-    const messageId = crypto.randomBytes(7).toString('hex');
-    const chatId = crypto.randomBytes(7).toString('hex');
+    const lastMessage = chatHistory[chatHistory.length - 1];
 
-    // Préparation de la requête
-    const expertSearchRequest: ExpertSearchRequest = {
-      query: body.query,
+    if (!lastMessage) {
+      return res.status(400).json({ message: 'No messages in chat history' });
+    }
+
+    const searchRequest: ExpertSearchRequest = {
+      query: lastMessage.content.toString(),
       chat_history: chatHistory,
-      messageId,
-      chatId
+      messageId: 'search_' + Date.now(),
+      chatId: 'chat_' + Date.now()
     };
 
-    // Recherche d'experts
-    const expertResults = await handleExpertSearch(expertSearchRequest, llm);
-    console.log("🔍 Experts trouvés:", expertResults.experts.length);
+    const result = await handleExpertSearch(searchRequest, llm);
 
-    // Format unifié de la réponse
     res.status(200).json({
-      type: 'expert_results',
-      messageId,
-      data: {
-        experts: expertResults.experts,
-        synthese: expertResults.synthese,
-        query: body.query
+      suggestions: [],
+      suggestedExperts: result.experts
+    });
+  } catch (err) {
+    res.status(500).json({ message: 'An error has occurred.' });
+    logger.error(`Error in finding experts: ${err.message}`);
+  }
+});
+
+router.post('/suggestionexperts', async (req, res) => {
+  try {
+    let body: ExpertsBody = req.body;
+
+    const chatHistory: BaseMessage[] = body.chatHistory.map((msg) => {
+      if (msg.role === 'user') {
+        return new HumanMessage(msg.content);
+      } else {
+        return new AIMessage(msg.content);
       }
     });
 
+    const chatModelProviders = await getAvailableChatModelProviders();
+
+    const chatModelProvider =
+      body.chatModel?.provider || Object.keys(chatModelProviders)[0];
+    const chatModel =
+      body.chatModel?.model ||
+      Object.keys(chatModelProviders[chatModelProvider])[0];
+
+    let llm: BaseChatModel | undefined;
+
+    if (body.chatModel?.provider === 'custom_openai') {
+      if (
+        !body.chatModel?.customOpenAIBaseURL ||
+        !body.chatModel?.customOpenAIKey
+      ) {
+        return res
+          .status(400)
+          .json({ message: 'Missing custom OpenAI base URL or key' });
+      }
+
+      llm = new ChatOpenAI({
+        modelName: body.chatModel.model,
+        openAIApiKey: body.chatModel.customOpenAIKey,
+        temperature: 0.7,
+        configuration: {
+          baseURL: body.chatModel.customOpenAIBaseURL,
+        },
+      }) as unknown as BaseChatModel;
+    } else if (
+      chatModelProviders[chatModelProvider] &&
+      chatModelProviders[chatModelProvider][chatModel]
+    ) {
+      llm = chatModelProviders[chatModelProvider][chatModel].model;
+    }
+
+    if (!llm) {
+      return res.status(400).json({ message: 'Invalid model selected' });
+    }
+
+    const lastMessage = chatHistory[chatHistory.length - 1];
+
+    if (!lastMessage) {
+      return res.status(400).json({ message: 'No messages in chat history' });
+    }
+
+    const searchRequest: ExpertSearchRequest = {
+      query: lastMessage.content.toString(),
+      chat_history: chatHistory,
+      messageId: 'search_' + Date.now(),
+      chatId: 'chat_' + Date.now()
+    };
+
+    const result = await handleExpertSearch(searchRequest, llm);
+
+    // S'assurer que tous les champs requis sont présents avec des valeurs par défaut
+    const experts = result.experts.map(expert => ({
+      id: expert.id || 0,
+      id_expert: expert.id_expert || '',
+      nom: expert.nom || '',
+      prenom: expert.prenom || '',
+      adresse: expert.adresse || '',
+      pays: expert.pays || '',
+      ville: expert.ville || '',
+      expertises: expert.expertises || '',
+      biographie: expert.biographie || '',
+      tarif: expert.tarif || 0,
+      services: expert.services || {},
+      created_at: expert.created_at || new Date().toISOString(),
+      image_url: expert.image_url || ''
+    }));
+
+    res.status(200).json({
+      suggestions: [],
+      suggestedExperts: experts
+    });
   } catch (err) {
-    console.error("🔍 Erreur dans la recherche d'experts:", err);
-    res.status(500).json({ message: 'Une erreur est survenue.' });
-    logger.error(`Erreur dans la recherche d'experts: ${err.message}`);
+    res.status(500).json({ message: 'An error has occurred.' });
+    logger.error(`Error in finding experts: ${err.message}`);
   }
 });
 

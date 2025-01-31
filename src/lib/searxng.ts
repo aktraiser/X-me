@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { getSearxngApiEndpoint } from '../config';
+import { getSearxngApiEndpoint, getSearxngEtudeApiEndpoint } from '../config';
 
 export interface SearxngSearchOptions {
   language?: string;
@@ -7,6 +7,7 @@ export interface SearxngSearchOptions {
   categories?: string[];
   limit?: number;
   pageno?: number;
+  isEtude?: boolean;
 }
 
 interface SearxngSearchResult {
@@ -24,13 +25,14 @@ export async function searchSearxng(
   query: string,
   opts: SearxngSearchOptions = {}
 ) {
-  const searxngURL = getSearxngApiEndpoint();
+  const searxngURL = opts.isEtude ? getSearxngEtudeApiEndpoint() : getSearxngApiEndpoint();
 
   const url = new URL(`${searxngURL}/search?format=json`);
   url.searchParams.append('q', query);
 
   if (opts) {
     Object.keys(opts).forEach((key) => {
+      if (key === 'isEtude') return;
       if (Array.isArray(opts[key])) {
         url.searchParams.append(key, opts[key].join(','));
         return;

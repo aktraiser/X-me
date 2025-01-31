@@ -12,6 +12,7 @@ import { RecursiveCharacterTextSplitter } from 'langchain/text_splitter';
 import { Document } from '@langchain/core/documents';
 import { RAGDocumentChain } from '../chains/rag_document_upload';
 import { Chroma } from "@langchain/community/vectorstores/chroma";
+import { PDFDocument } from 'pdf-lib';
 
 const router = express.Router();
 
@@ -76,7 +77,21 @@ const processDocumentInBatches = async (
   for (let i = 0; i < docs.length; i += batchSize) {
     const batch = docs.slice(i, i + batchSize);
     const processed = await Promise.all(
-      batch.map(async (doc) => preprocessDocument(doc))
+      batch.map(async (doc) => {
+        const processedDoc = preprocessDocument(doc);
+        console.log(`📑 Traitement chunk - Page ${doc.metadata.page} - Métadonnées:`, doc.metadata);
+        // Préserver les métadonnées de page dans les chunks
+        return new Document({
+          pageContent: processedDoc.pageContent,
+          metadata: {
+            ...processedDoc.metadata,
+            page: doc.metadata.page,
+            pageNumber: doc.metadata.page,
+            total_pages: doc.metadata.total_pages,
+            type: 'uploaded'
+          }
+        });
+      })
     );
     processedDocs.push(...processed);
   }
@@ -97,6 +112,25 @@ const extractDocument = async (filePath: string, mimeType: string): Promise<Docu
         parsedItemSeparator: "\n",
       });
       docs = await loader.load();
+      
+      // Ajouter explicitement le numéro de page au début de chaque document
+      docs = docs.map((doc, index) => {
+        const pageNum = index + 1;
+        console.log(`📄 Page ${pageNum} - Métadonnées initiales:`, doc.metadata);
+        return new Document({
+          pageContent: `Page ${pageNum}\n\n${doc.pageContent}`,
+          metadata: {
+            ...doc.metadata,
+            source: filePath,
+            page: pageNum,
+            pageNumber: pageNum,
+            total_pages: docs.length,
+            mime_type: mimeType,
+            type: 'uploaded',
+            extraction_date: new Date().toISOString()
+          }
+        });
+      });
     } else if (mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
       const loader = new DocxLoader(filePath);
       docs = await loader.load();
@@ -365,6 +399,7 @@ router.get('/:fileId/view', async (req, res) => {
 router.get('/:fileId/content', async (req, res) => {
   try {
     const { fileId } = req.params;
+    const page = req.query.page ? parseInt(req.query.page as string) : undefined;
     
     // Chercher le fichier PDF dans le dossier uploads
     const uploadsDir = path.join(process.cwd(), 'uploads');
@@ -377,15 +412,32 @@ router.get('/:fileId/content', async (req, res) => {
     }
 
     const filePath = path.join(uploadsDir, pdfFile);
-    console.log("📄 Envoi du fichier PDF:", filePath);
+    console.log("📄 Envoi du fichier PDF:", filePath, "Page:", page);
 
-    // Headers pour le PDF
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${pdfFile}"`);
-    res.setHeader('Cache-Control', 'public, max-age=3600'); // Cache d'une heure
-    
-    // Envoyer le fichier
-    res.sendFile(filePath);
+    if (page) {
+      // Lire le PDF existant
+      const existingPdfBytes = fs.readFileSync(filePath);
+      const pdfDoc = await PDFDocument.load(existingPdfBytes);
+      
+      // Créer un nouveau document pour la page spécifique
+      const newPdfDoc = await PDFDocument.create();
+      const [copiedPage] = await newPdfDoc.copyPages(pdfDoc, [page - 1]);
+      newPdfDoc.addPage(copiedPage);
+      
+      // Sauvegarder le nouveau PDF
+      const pdfBytes = await newPdfDoc.save();
+      
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `inline; filename="${pdfFile}"`);
+      res.setHeader('Content-Length', pdfBytes.length);
+      res.send(Buffer.from(pdfBytes));
+    } else {
+      // Si aucune page n'est spécifiée, envoyer le PDF complet
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `inline; filename="${pdfFile}"`);
+      res.setHeader('Cache-Control', 'public, max-age=3600');
+      res.sendFile(filePath);
+    }
   } catch (error) {
     console.error('❌ Erreur lors de l\'accès au PDF:', error);
     res.status(500).json({ error: 'Erreur lors de l\'accès au document' });

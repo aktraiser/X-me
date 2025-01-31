@@ -34,12 +34,17 @@ services:
       - DATABASE_URL=postgresql://postgres.ineclpmaolnshsnekjad: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@aws-0-us-east-1.pooler.supabase.com:6543/postgres
     depends_on:
       - searxng
+      - chroma
     ports:
       - 3001:3001
     volumes:
       - backend-dbstore:/home/xme/data
       - uploads:/home/xme/uploads
       - ./config.toml:/home/perplexica/config.toml
+      - type: bind
+        source: ./documentation
+        target: /home/xme/documentation
+        read_only: true
     extra_hosts:
       - host.docker.internal:host-gateway
     networks:
@@ -55,6 +60,8 @@ services:
         NEXT_PUBLIC_API_URL: http://localhost:3001/api
         NEXT_PUBLIC_SUPABASE_URL: https://qytbxgzxsywnfhlwcyqa.supabase.co
         NEXT_PUBLIC_SUPABASE_ANON_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InF5dGJ4Z3p4c3l3bmZobHdjeXFhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3MzEwNTc3MTAsImV4cCI6MjA0NjYzMzcxMH0.XLRq-4CFL2MWxvCLzCv5ZdaF5VSi58cocx9FOyv37jU
+    environment:
+      - NODE_ENV=production
     image: itzcrazykns1337/xme-frontend:main
     depends_on:
       - xme-backend

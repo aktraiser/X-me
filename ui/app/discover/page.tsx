@@ -10,22 +10,7 @@ import { useRouter } from 'next/navigation';
 import Image from 'next/image';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { FilterModal } from "@/components/FilterModal";
-
-interface Expert {
-  id: number;
-  id_expert: string;
-  nom: string;
-  prenom: string;
-  adresse: string;
-  pays: string;
-  ville: string;
-  expertises: string;
-  biographie: string;
-  tarif: number;
-  services: any;
-  created_at: string;
-  image_url: string;
-}
+import { Expert } from '@/lib/actions';
 
 interface Location {
   pays: string;

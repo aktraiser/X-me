@@ -29,6 +29,8 @@ RÈGLES D'EXTRACTION :
   * Identifier le domaine principal (comptabilité, droit, marketing, etc.)
   * Reconnaître les spécialisations (droit des affaires, marketing digital, etc.)
   * Nettoyer les mots parasites (expert, spécialiste, professionnel, etc.)
+  * Extraire les mots-clés pertinents pour la recherche
+  * Prendre en compte les synonymes et variations
 
 - Pour la VILLE :
   * Si mentionnée
@@ -51,6 +53,14 @@ ville: paris
 expertise: droit des affaires
 ville: lyon
 
+3. "Qui peut m'aider avec le marketing digital ?"
+expertise: marketing digital
+ville: 
+
+4. "Je cherche quelqu'un pour m'aider à créer mon entreprise"
+expertise: création d'entreprise
+ville: 
+
 Conversation précédente :
 {chat_history}
 
@@ -58,7 +68,7 @@ Requête actuelle : {query}
 
 Principe de recherche d'expert :
 - Pour toute recherche d'expert, extraire UNIQUEMENT :
-  * L'expertise demandée
+  * L'expertise demandée (avec ses variations et synonymes)
   * La ville (si mentionnée)
 
 - Mots déclencheurs à reconnaître :
@@ -66,6 +76,19 @@ Principe de recherche d'expert :
   * "besoin d'un professionnel"
   * "recherche quelqu'un pour"
   * "qui peut m'aider avec"
+  * "conseil en"
+  * "assistance pour"
+  * "accompagnement dans"
+
+- Domaines d'expertise à reconnaître :
+  * Création d'entreprise (entrepreneuriat, lancement d'activité, etc.)
+  * Comptabilité (gestion comptable, fiscalité, etc.)
+  * Marketing (digital, traditionnel, stratégie, etc.)
+  * Droit (des affaires, commercial, fiscal, etc.)
+  * Finance (gestion financière, investissement, etc.)
+  * Stratégie (développement, business plan, etc.)
+  * RH (ressources humaines, recrutement, etc.)
+  * Communication (relations publiques, médias, etc.)
 
 <example>
 \`<query>
@@ -117,76 +140,109 @@ const strParser = new StringOutputParser();
 
 // Fonction pour convertir les données de l'expert
 const convertToExpert = (data: any): Expert => {
+  const baseUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
   return {
-    id: data.id,
+    id: data.id || 0,
     id_expert: data.id_expert || '',
-    nom: data.nom,
-    prenom: data.prenom,
+    nom: data.nom || '',
+    prenom: data.prenom || '',
     adresse: data.adresse || '',
-    pays: data.pays,
-    ville: data.ville,
-    expertises: data.expertises,
-    specialite: data.specialite || data.expertises?.[0] || '',
-    biographie: data.biographie,
+    pays: data.pays || '',
+    ville: data.ville || '',
+    expertises: data.expertises || '',
+    specialite: data.specialite,
+    biographie: data.biographie || '',
     tarif: data.tarif || 0,
-    services: data.services,
-    created_at: data.created_at,
-    image_url: data.image_url
+    services: data.services || {},
+    created_at: data.created_at || new Date().toISOString(),
+    image_url: data.image_url || '',
+    url: `${baseUrl}/expert/${data.prenom.toLowerCase()}-${data.nom.toLowerCase()}-${data.id_expert}`.replace(/\s+/g, '-')
   };
 };
 
 const createExpertSearchChain = (llm: BaseChatModel) => {
+  // Créer le prompt pour l'analyse de la requête
+  const searchAnalysisPrompt = ChatPromptTemplate.fromTemplate(ExpertSearchChainPrompt);
+
   return RunnableSequence.from([
+    // 1. Préparer les inputs
     RunnableMap.from({
-      chat_history: (input: ExpertSearchChainInput) => {
-        return formatChatHistoryAsString(input.chat_history || []);
-      },
-      query: (input: ExpertSearchChainInput) => {
-        return input.query || '';
-      },
+      query: (input: ExpertSearchChainInput) => input.query || '',
+      chat_history: (input: ExpertSearchChainInput) => 
+        formatChatHistoryAsString(input.chat_history || []),
     }),
-    PromptTemplate.fromTemplate(ExpertSearchChainPrompt),
-    llm,
-    strParser,
-    RunnableLambda.from(async (response: string) => {
+    // 2. Analyser la requête avec le LLM
+    RunnableSequence.from([
+      searchAnalysisPrompt,
+      llm,
+      strParser,
+    ]),
+    // 3. Extraire les critères de recherche
+    RunnableLambda.from(async (llmOutput: string) => {
+      console.log('🤖 Analyse LLM:', llmOutput);
+      
+      // Extraire expertise et ville du résultat LLM
+      const expertiseMatch = llmOutput.match(/expertise:\s*(.+)/i);
+      const villeMatch = llmOutput.match(/ville:\s*(.+)/i);
+      
+      const expertise = expertiseMatch?.[1]?.trim() || '';
+      const ville = villeMatch?.[1]?.trim() || '';
+      
+      console.log('📊 Critères extraits:', { expertise, ville });
+      
+      return { expertise, ville };
+    }),
+    // 4. Rechercher les experts
+    RunnableLambda.from(async (criteria: { expertise: string, ville: string }) => {
       try {
-        // Extraire expertise et ville avec gestion des erreurs
-        const lines = response.split('\n').filter(line => line.trim() !== '');
-        const expertise = lines[0]?.replace('expertise:', '')?.trim() || '';
-        const ville = lines[1]?.replace('ville:', '')?.trim() || '';
+        console.log('🔍 Recherche avec critères:', criteria);
 
-        if (!expertise) {
-          return {
-            experts: [],
-            synthese: "Je n'ai pas pu identifier l'expertise recherchée."
-          } as ExpertSearchResponse;
-        }
-
-        // Rechercher les experts
+        // Construire la requête Supabase
         let query = supabase
           .from('experts')
-          .select('*')
-          .ilike('expertises', `%${expertise}%`)
-          .limit(3);
+          .select('*');
 
-        if (ville) {
-          query = query.ilike('ville', `%${ville}%`);
+        // Ajouter les conditions de recherche
+        if (criteria.expertise) {
+          // Séparer les mots de l'expertise
+          const keywords = criteria.expertise.toLowerCase().split(/\s+/);
+          
+          // Construire la requête pour chaque mot-clé
+          keywords.forEach(keyword => {
+            query = query.or(`expertises.ilike.%${keyword}%,biographie.ilike.%${keyword}%`);
+          });
         }
 
-        const { data: experts, error } = await query;
+        // Ajouter le filtre de ville si spécifié
+        if (criteria.ville) {
+          query = query.ilike('ville', `%${criteria.ville}%`);
+        }
 
-        if (error) throw error;
+        // Exécuter la requête
+        const { data: experts, error } = await query.limit(5);
+
+        console.log('🔍 Résultat de la requête experts:', {
+          criteres: criteria,
+          nbExperts: experts?.length || 0,
+          error: error?.message
+        });
+
+        if (error) {
+          console.error('❌ Erreur Supabase:', error);
+          throw error;
+        }
 
         if (!experts || experts.length === 0) {
           return {
             experts: [],
-            synthese: "Désolé, je n'ai pas trouvé d'experts correspondant à vos critères."
+            synthese: `Désolé, je n'ai pas trouvé d'experts en ${criteria.expertise}${criteria.ville ? ` à ${criteria.ville}` : ''}.`
           } as ExpertSearchResponse;
         }
 
+        // Générer la synthèse avec le LLM
         const synthesePrompt = PromptTemplate.fromTemplate(ExpertAnalysisPrompt);
         const formattedPrompt = await synthesePrompt.format({
-          query: response,
+          query: `Recherche d'expert en ${criteria.expertise}${criteria.ville ? ` à ${criteria.ville}` : ''}`,
           experts: JSON.stringify(experts, null, 2)
         });
 
@@ -201,7 +257,7 @@ const createExpertSearchChain = (llm: BaseChatModel) => {
         } as ExpertSearchResponse;
 
       } catch (error) {
-        console.error('❌ Erreur:', error);
+        console.error('❌ Erreur dans la recherche:', error);
         return {
           experts: [],
           synthese: "Une erreur est survenue lors de la recherche d'experts."

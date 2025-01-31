@@ -7,9 +7,15 @@ ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
 
 WORKDIR /home/perplexica
 
-COPY ui /home/perplexica/
+# Copier d'abord package.json et yarn.lock
+COPY ui/package.json ui/yarn.lock ./
 
-RUN yarn install --frozen-lockfile
+# Installer les dépendances
+RUN yarn install
+
+# Copier le reste des fichiers
+COPY ui/ ./
+
 RUN yarn build
 
 CMD ["yarn", "start"]

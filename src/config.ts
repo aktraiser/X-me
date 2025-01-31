@@ -16,9 +16,11 @@ interface Config {
     ANTHROPIC: string;
     GEMINI: string;
     SUPABASE: string;
+    DEEPSEEK: string;
   };
   API_ENDPOINTS: {
     SEARXNG: string;
+    SEARXNG_ETUDE: string;
     OLLAMA: string;
     SUPABASE_URL: string;
   };
@@ -54,10 +56,25 @@ export const getSupabaseKey = () =>
 export const getSearxngApiEndpoint = () =>
   process.env.SEARXNG_API_URL || loadConfig().API_ENDPOINTS.SEARXNG;
 
+export const getSearxngEtudeApiEndpoint = () =>
+  process.env.SEARXNG_ETUDE_API_URL || loadConfig().API_ENDPOINTS.SEARXNG_ETUDE;
+
 export const getSupabaseUrl = () => 
   process.env.SUPABASE_URL || loadConfig().API_ENDPOINTS.SUPABASE_URL;
 
 export const getOllamaApiEndpoint = () => loadConfig().API_ENDPOINTS.OLLAMA;
+
+export const getDeepseekApiKey = () => {
+  const apiKey = process.env.DEEPSEEK_API_KEY || loadConfig().API_KEYS.DEEPSEEK;
+  if (!apiKey) {
+    throw new Error('DEEPSEEK_API_KEY is not set in environment variables or config.toml');
+  }
+  return apiKey;
+};
+
+export const getOpenAIBaseURL = () => {
+  return process.env.OPENAI_API_BASE_URL || 'https://api.openai.com/v1';
+};
 
 export const updateConfig = (config: RecursivePartial<Config>) => {
   const currentConfig = loadConfig();

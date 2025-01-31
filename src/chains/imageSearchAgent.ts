@@ -10,30 +10,23 @@ import { StringOutputParser } from '@langchain/core/output_parsers';
 import { searchSearxng } from '../lib/searxng';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 
+const EXCLUDE_TERMS = [
+  'watermark',
+  'shutterstock',
+  'istockphoto',
+  'photo by',
+  'unsplash+',
+  'getty'
+];
+
 const imageSearchChainPrompt = `
-Vous êtes un expert en recherche d'images pour illustrer des contenus business. Votre objectif est de trouver des images élégantes et modernes qui illustrent le sujet de manière indirecte et esthétique.
+Vous êtes un expert en recherche d'images sur Unsplash. Votre objectif est de trouver des images professionnelles et authentiques qui illustrent parfaitement le contexte business.
 
-Principes à suivre :
-- Privilégier des images lifestyle et esthétiques
-- Éviter les schémas, graphiques et images trop techniques
-- Favoriser des images avec des personnes dans des situations naturelles
-- Choisir des images lumineuses et positives
-- Préférer des compositions simples et épurées
-
-Format de la requête :
-- 2-3 mots-clés maximum
-- Ajouter "lifestyle" ou "modern" pour améliorer la qualité
-- Toujours ajouter "professional" pour le contexte business
-
-Exemples :
-1. Question : "Comment créer une entreprise ?"
-Requête : "entrepreneur lifestyle modern"
-
-2. Question : "Qu'est-ce qu'un business plan ?"
-Requête : "business meeting professional"
-
-3. Question : "Comment faire sa comptabilité ?"
-Requête : "office work lifestyle"
+Instructions :
+- Traduisez la demande en 2-3 mots-clés maximum en anglais
+- Privilégiez des termes génériques et visuels (ex: "business meeting", "office team", "startup workspace")
+- Évitez les termes techniques ou trop spécifiques
+- Recherchez des images naturelles montrant des personnes en situation professionnelle
 
 Conversation :
 {chat_history}
@@ -63,14 +56,20 @@ const createImageSearchChain = (llm: BaseChatModel) => {
     strParser,
     RunnableLambda.from(async (input: string) => {
       const res = await searchSearxng(input, {
-        engines: ['google_images', 'bing_images'],
+        engines: ['unsplash'],
         language: 'fr',
         categories: ['images'],
       });
       
       const images = [];
       res.results.forEach((result) => {
-        if (result.img_src && result.url && result.title) {
+        if (
+          result.img_src && 
+          result.url && 
+          result.title &&
+          !containsTechnicalContent(result) &&
+          isRelevantImage(result)
+        ) {
           images.push({
             img_src: result.img_src,
             url: result.url,
@@ -79,9 +78,82 @@ const createImageSearchChain = (llm: BaseChatModel) => {
         }
       });
       
-      return images.slice(0, 10);
+      const sortedImages = images.sort((a, b) => {
+        const scoreA = calculateRelevanceScore(a);
+        const scoreB = calculateRelevanceScore(b);
+        return scoreB - scoreA;
+      });
+      
+      return sortedImages.slice(0, 5);
     }),
   ]);
+};
+
+const containsTechnicalContent = (result: any): boolean => {
+  // On récupère le titre et l'URL en minuscule
+  const content = (result.title + ' ' + result.url).toLowerCase();
+
+  // Mots-clés existants
+  const techTerms = ['diagram', 'chart', 'graph', 'schema', 'process', 'workflow'];
+
+  // Si l'un ou l'autre est trouvé, on considère le résultat invalide
+  return (
+    techTerms.some(term => content.includes(term)) ||
+    EXCLUDE_TERMS.some(term => content.includes(term))
+  );
+};
+
+const isRelevantImage = (result: any): boolean => {
+  // Vérifier si l'image vient d'Unsplash
+  if (!result.url.includes('unsplash.com')) {
+    return false;
+  }
+
+  // Vérifier que ce n'est pas une image Unsplash+
+  if (result.url.includes('plus.unsplash.com')) {
+    return false;
+  }
+
+  // Vérifier la qualité de l'image
+  const qualityTerms = [
+    'business', 'office', 'professional',
+    'team', 'meeting', 'workplace',
+    'startup', 'work', 'collaboration',
+    'corporate', 'company', 'entrepreneur'
+  ];
+
+  const content = result.title.toLowerCase();
+  return qualityTerms.some(term => content.includes(term));
+};
+
+const calculateRelevanceScore = (image: any): number => {
+  let score = 0;
+
+  // Score de base pour les images Unsplash
+  if (image.url.includes('unsplash.com') && !image.url.includes('plus.unsplash.com')) {
+    score += 10;
+  }
+
+  // Bonus pour les termes pertinents
+  const qualityTerms = [
+    'business', 'office', 'professional',
+    'team', 'meeting', 'workplace',
+    'startup', 'work', 'collaboration',
+    'corporate', 'company', 'entrepreneur'
+  ];
+
+  qualityTerms.forEach(term => {
+    if (image.title.toLowerCase().includes(term)) {
+      score += 2;
+    }
+  });
+
+  // Malus pour les contenus non désirés
+  if (containsTechnicalContent(image)) {
+    score -= 10;
+  }
+
+  return score;
 };
 
 const handleImageSearch = (

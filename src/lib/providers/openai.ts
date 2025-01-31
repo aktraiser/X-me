@@ -9,20 +9,20 @@ export const loadOpenAIChatModels = async () => {
 
   try {
     const chatModels = {
+      'gpt-4o': {
+        displayName: 'gpt-4o-2024-11-20',
+        model: new ChatOpenAI({
+          openAIApiKey,
+          modelName: 'gpt-4o',
+          temperature: 1.3,
+        }),
+      },
       'gpt-3.5-turbo': {
         displayName: 'GPT-3.5 Turbo',
         model: new ChatOpenAI({
           openAIApiKey,
           modelName: 'gpt-3.5-turbo',
-          temperature: 0.7,
-        }),
-      },
-      'gpt-4': {
-        displayName: 'GPT-4',
-        model: new ChatOpenAI({
-          openAIApiKey,
-          modelName: 'gpt-4',
-          temperature: 0.7,
+          temperature: 1.2,
         }),
       },
       'gpt-4-turbo': {
@@ -30,23 +30,23 @@ export const loadOpenAIChatModels = async () => {
         model: new ChatOpenAI({
           openAIApiKey,
           modelName: 'gpt-4-turbo',
-          temperature: 0.7,
+          temperature: 0.2,
         }),
       },
-      'gpt-4o': {
+      'gpt-4omni': {
         displayName: 'GPT-4 omni',
         model: new ChatOpenAI({
           openAIApiKey,
           modelName: 'gpt-4o',
-          temperature: 0.7,
+          temperature: 0.2,
         }),
       },
       'gpt-4o-mini': {
-        displayName: 'GPT-4 omni mini',
+        displayName: 'gpt-4o-mini-2024-07-18',
         model: new ChatOpenAI({
           openAIApiKey,
           modelName: 'gpt-4o-mini',
-          temperature: 0.7,
+          temperature: 1.2,
         }),
       },
     };
@@ -70,6 +70,7 @@ export const loadOpenAIEmbeddingsModels = async () => {
         model: new OpenAIEmbeddings({
           openAIApiKey,
           modelName: 'text-embedding-3-small',
+          stripNewLines: true,
         }),
       },
       'text-embedding-3-large': {
@@ -77,6 +78,7 @@ export const loadOpenAIEmbeddingsModels = async () => {
         model: new OpenAIEmbeddings({
           openAIApiKey,
           modelName: 'text-embedding-3-large',
+          stripNewLines: true,
         }),
       },
     };

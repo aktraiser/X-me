@@ -1,123 +1,165 @@
 /* eslint-disable @next/next/no-img-element */
-import {
-  Dialog,
-  DialogPanel,
-  DialogTitle,
-  Transition,
-  TransitionChild,
-} from '@headlessui/react';
 import { Document } from '@langchain/core/documents';
 import { File } from 'lucide-react';
-import { Fragment, useState } from 'react';
+import { cn } from '@/lib/utils';
+import { useState } from 'react';
 
-const MessageSources = ({ sources }: { sources: Document[] }) => {
-  const [isDialogOpen, setIsDialogOpen] = useState(false);
-
-  const closeModal = () => {
-    setIsDialogOpen(false);
-    document.body.classList.remove('overflow-hidden-scrollable');
-  };
-
-  const openModal = () => {
-    setIsDialogOpen(true);
-    document.body.classList.add('overflow-hidden-scrollable');
-  };
+const MessageSources = ({ 
+  sources,
+  openModal
+}: { 
+  sources: Document[];
+  openModal: () => void;
+}) => {
+  const [hoveredSource, setHoveredSource] = useState<Document | null>(null);
+  const [isModalButtonActive, setIsModalButtonActive] = useState(false);
 
   const getSourceUrl = (source: Document) => {
     if (source.metadata.isFile) {
-      // Pour les fichiers locaux, on retourne à la fois l'URL du viewer et l'URL directe du PDF
       const page = source.metadata.page || 1;
       return {
-        viewerUrl: source.metadata.url, // On utilise l'URL déjà construite
+        viewerUrl: source.metadata.url,
         pdfUrl: `/api/uploads/${source.metadata.fileId}/content?page=${page}`
       };
     }
-    // Pour les URLs web, on retourne la même URL pour les deux
     return {
       viewerUrl: source.metadata.url,
       pdfUrl: source.metadata.url
     };
   };
 
+  const getFaviconUrl = (source: Document) => {
+    if (source.metadata.isFile) {
+      return null;
+    }
+    if (!source.metadata.url) {
+      return null;
+    }
+    try {
+      const url = new URL(source.metadata.url);
+      return `https://s2.googleusercontent.com/s2/favicons?domain_url=${encodeURIComponent(url.origin)}`;
+    } catch {
+      return null;
+    }
+  };
+
+  const filteredSources = sources.filter(source => source.metadata.type !== 'expert');
+
   return (
-    <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
-      {sources.slice(0, 3).map((source, i) => {
+    <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 relative">
+      {filteredSources.slice(0, 3).map((source, i) => {
         const urls = getSourceUrl(source);
         const isFile = source.metadata.isFile;
+        const faviconUrl = getFaviconUrl(source);
         
         const CardContent = () => (
           <>
-            <p className="dark:text-white text-xs overflow-hidden whitespace-nowrap text-ellipsis">
+            <p className="dark:text-white text-xs line-clamp-2">
               {source.metadata.title}
             </p>
-            <div className="flex flex-row items-center justify-between">
+            <div className="flex flex-row items-center justify-between mt-auto">
               <div className="flex flex-row items-center space-x-1">
                 {isFile ? (
-                  <div className="bg-dark-200 hover:bg-dark-100 transition duration-200 flex items-center justify-center w-6 h-6 rounded-full">
+                  <div className="bg-gray-700 hover:bg-dark-100 transition duration-200 flex items-center justify-center w-6 h-6 rounded-full">
                     <File size={12} className="text-white/70" />
                   </div>
-                ) : (
+                ) : faviconUrl ? (
                   <img
-                    src={`https://s2.googleusercontent.com/s2/favicons?domain_url=${source.metadata.url}`}
+                    src={faviconUrl}
                     width={16}
                     height={16}
                     alt="favicon"
                     className="rounded-lg h-4 w-4"
+                    onError={(e) => {
+                      (e.target as HTMLImageElement).style.display = 'none';
+                    }}
                   />
+                ) : (
+                  <div className="bg-gray-700 hover:bg-dark-100 transition duration-200 flex items-center justify-center w-6 h-6 rounded-full">
+                    <File size={12} className="text-white/70" />
+                  </div>
                 )}
-                <p className="text-xs text-black/50 dark:text-white/50 overflow-hidden whitespace-nowrap text-ellipsis">
+                <p className="text-xs text-black/50 dark:text-white/50 truncate max-w-[120px] flex-shrink">
                   {isFile 
                     ? `Page ${source.metadata.page || 1}`
-                    : source.metadata.url.replace(/.+\/\/|www.|\..+/g, '')}
+                    : source.metadata.url
+                      ? new URL(source.metadata.url).hostname.replace(/^www\./, '')
+                      : 'Source'}
                 </p>
-              </div>
-              <div className="flex flex-row items-center space-x-2">
-                {!isFile && (
-                  <a
-                    href={urls.viewerUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-xs text-blue-500 hover:text-blue-600 transition-colors duration-200"
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    Voir
-                  </a>
-                )}
-                <div className="flex flex-row items-center space-x-1 text-black/50 dark:text-white/50 text-xs">
-                  <div className="bg-black/50 dark:bg-white/50 h-[4px] w-[4px] rounded-full" />
-                  <span>{i + 1}</span>
-                </div>
               </div>
             </div>
           </>
         );
 
-        return isFile ? (
-          <a
-            key={i}
-            href={urls.viewerUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="bg-light-100 hover:bg-light-200 dark:bg-dark-100 dark:hover:bg-dark-200 transition duration-200 rounded-lg p-3 flex flex-col space-y-2 font-medium"
-          >
-            <CardContent />
-          </a>
-        ) : (
-          <div
-            key={i}
-            className="bg-light-100 hover:bg-light-200 dark:bg-dark-100 dark:hover:bg-dark-200 transition duration-200 rounded-lg p-3 flex flex-col space-y-2 font-medium"
-          >
-            <CardContent />
+        return (
+          <div key={i} className="relative">
+            <a
+              href={urls.viewerUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="bg-light-100 hover:bg-light-200 dark:bg-dark-100 dark:hover:bg-gray-800 transition duration-200 rounded-lg p-3 flex flex-col justify-between h-20 font-medium cursor-pointer"
+              onMouseEnter={() => setHoveredSource(source)}
+              onMouseLeave={() => setHoveredSource(null)}
+            >
+              <CardContent />
+            </a>
+            {hoveredSource === source && (
+              <div className="absolute z-50 w-[300px] bg-white dark:bg-gray-800 rounded-lg shadow-lg p-4 mt-2 top-full left-1/2 transform -translate-x-1/2 border border-gray-200 dark:border-gray-700">
+                <div className="flex items-start space-x-3">
+                  {isFile ? (
+                    <div className="bg-gray-800 flex items-center justify-center w-10 h-10 rounded-lg flex-shrink-0">
+                      <File size={16} className="text-white" />
+                    </div>
+                  ) : faviconUrl ? (
+                    <img
+                      src={faviconUrl}
+                      width={16}
+                      height={16}
+                      alt="favicon"
+                      className="rounded-lg h-4 w-4 object-cover flex-shrink-0"
+                    />
+                  ) : (
+                    <div className="bg-gray-700 flex items-center justify-center w-10 h-10 rounded-lg flex-shrink-0">
+                      <File size={16} className="text-white" />
+                    </div>
+                  )}
+                  <div className="flex-1 min-w-0">
+                    <h3 className="text-sm font-medium text-gray-900 dark:text-white truncate">
+                      {source.metadata.title}
+                    </h3>
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1 line-clamp-2">
+                      {source.pageContent}
+                    </p>
+                    <div className="flex items-center mt-2">
+                      <p className="text-xs text-gray-500 dark:text-gray-400">
+                        {isFile 
+                          ? `Document PDF - Page ${source.metadata.page || 1}`
+                          : source.metadata.url
+                            ? new URL(source.metadata.url).hostname.replace(/^www\./, '')
+                            : 'Source'}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         );
       })}
-      {sources.length > 3 && (
+      {filteredSources.length > 3 && (
         <button
-          onClick={openModal}
-          className="bg-light-100 hover:bg-light-200 dark:bg-dark-100 dark:hover:bg-dark-200 transition duration-200 rounded-lg p-3 flex flex-col space-y-2 font-medium"
+          onClick={() => {
+            setIsModalButtonActive(true);
+            openModal();
+          }}
+          onBlur={() => setIsModalButtonActive(false)}
+          className={cn(
+            "bg-light-100 hover:bg-light-200 dark:bg-dark-100 dark:hover:bg-gray-800 transition duration-200 rounded-lg p-3 flex flex-col justify-between h-20 font-medium w-full",
+            isModalButtonActive && "ring-2 ring-[#767171] bg-light-200 dark:bg-gray-800"
+          )}
         >
           <div className="flex flex-row items-center space-x-1">
-            {sources.slice(3, 6).map((source, i) => {
+            {filteredSources.slice(3, 6).map((source, i) => {
               return source.metadata.isFile ? (
                 <div key={i} className="bg-dark-200 hover:bg-dark-100 transition duration-200 flex items-center justify-center w-6 h-6 rounded-full">
                   <File size={12} className="text-white/70" />
@@ -130,87 +172,20 @@ const MessageSources = ({ sources }: { sources: Document[] }) => {
                   height={16}
                   alt="favicon"
                   className="rounded-lg h-4 w-4"
+                  onError={(e) => {
+                    (e.target as HTMLImageElement).style.display = 'none';
+                  }}
                 />
               );
             })}
           </div>
-          <p className="text-xs text-black/50 dark:text-white/50">
-            View {sources.length - 3} more
-          </p>
+          <div className="flex flex-row items-center justify-between mt-auto">
+            <p className="text-xs text-black/50 dark:text-white/50">
+              Voir les {filteredSources.length - 3} sources
+            </p>
+          </div>
         </button>
       )}
-      <Dialog as="div" className="relative z-50" open={isDialogOpen} onClose={closeModal}>
-        <div className="fixed inset-0 overflow-y-auto">
-          <div className="flex min-h-full items-center justify-center p-4 text-center">
-            <Dialog.Panel className="w-full max-w-md transform rounded-2xl bg-light-secondary dark:bg-dark-secondary border border-light-200 dark:border-dark-200 p-6 text-left align-middle shadow-xl transition-all">
-              <Dialog.Title className="text-lg font-medium leading-6 dark:text-white">
-                Sources
-              </Dialog.Title>
-              <div className="grid grid-cols-2 gap-2 overflow-auto max-h-[300px] mt-2 pr-2">
-                {sources.map((source, i) => {
-                  const urls = getSourceUrl(source);
-                  return (
-                    <div
-                      key={i}
-                      className="bg-light-secondary hover:bg-light-200 dark:bg-dark-secondary dark:hover:bg-dark-200 border border-light-200 dark:border-dark-200 transition duration-200 rounded-lg p-3 flex flex-col space-y-2 font-medium"
-                    >
-                      <p className="dark:text-white text-xs overflow-hidden whitespace-nowrap text-ellipsis">
-                        {source.metadata.title}
-                      </p>
-                      <div className="flex flex-row items-center justify-between">
-                        <div className="flex flex-row items-center space-x-1">
-                          {source.metadata.isFile ? (
-                            <div className="bg-dark-200 hover:bg-dark-100 transition duration-200 flex items-center justify-center w-6 h-6 rounded-full">
-                              <File size={12} className="text-white/70" />
-                            </div>
-                          ) : (
-                            <img
-                              src={`https://s2.googleusercontent.com/s2/favicons?domain_url=${source.metadata.url}`}
-                              width={16}
-                              height={16}
-                              alt="favicon"
-                              className="rounded-lg h-4 w-4"
-                            />
-                          )}
-                          <p className="text-xs text-black/50 dark:text-white/50 overflow-hidden whitespace-nowrap text-ellipsis">
-                            {source.metadata.isFile 
-                              ? `Page ${source.metadata.page || 1}`
-                              : source.metadata.url.replace(/.+\/\/|www.|\..+/g, '')}
-                          </p>
-                        </div>
-                        <div className="flex flex-row items-center space-x-2">
-                          {source.metadata.isFile && (
-                            <a
-                              href={urls.pdfUrl}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="text-xs text-blue-500 hover:text-blue-600 transition-colors duration-200"
-                            >
-                              PDF
-                            </a>
-                          )}
-                          <a
-                            href={urls.viewerUrl}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-xs text-blue-500 hover:text-blue-600 transition-colors duration-200"
-                          >
-                            {source.metadata.isFile ? 'Voir' : 'Voir'}
-                          </a>
-                          <div className="flex flex-row items-center space-x-1 text-black/50 dark:text-white/50 text-xs">
-                            <div className="bg-black/50 dark:bg-white/50 h-[4px] w-[4px] rounded-full" />
-                            <span>{i + 1}</span>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </Dialog.Panel>
-          </div>
-        </div>
-      </Dialog>
     </div>
   );
 };

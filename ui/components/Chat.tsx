@@ -30,6 +30,9 @@ const Chat = ({
   const [dividerWidth, setDividerWidth] = useState(0);
   const dividerRef = useRef<HTMLDivElement | null>(null);
   const messageEnd = useRef<HTMLDivElement | null>(null);
+  const [userScrolling, setUserScrolling] = useState(false);
+  const lastScrollTop = useRef(0);
+  const isNearBottom = useRef(true);
 
   useEffect(() => {
     const updateDividerWidth = () => {
@@ -48,12 +51,41 @@ const Chat = ({
   });
 
   useEffect(() => {
-    messageEnd.current?.scrollIntoView({ behavior: 'smooth' });
+    const handleScroll = () => {
+      const scrollTop = window.scrollY;
+      const isScrollingUp = scrollTop < lastScrollTop.current;
+      
+      const windowHeight = window.innerHeight;
+      const documentHeight = document.documentElement.scrollHeight;
+      const scrollPosition = window.scrollY + windowHeight;
+      isNearBottom.current = documentHeight - scrollPosition < 100;
+      
+      if (isScrollingUp) {
+        setUserScrolling(true);
+      }
+      
+      lastScrollTop.current = scrollTop;
+    };
+
+    window.addEventListener('scroll', handleScroll);
+    return () => window.removeEventListener('scroll', handleScroll);
+  }, []);
+
+  useEffect(() => {
+    if (!userScrolling && messageEnd.current && isNearBottom.current) {
+      messageEnd.current.scrollIntoView({ behavior: 'smooth' });
+    }
 
     if (messages.length === 1) {
-      document.title = `${messages[0].content.substring(0, 30)} - Perplexica`;
+      document.title = `${messages[0].content.substring(0, 30)} - X-me`;
     }
-  }, [messages]);
+  }, [messages, userScrolling]);
+
+  useEffect(() => {
+    if (!loading && isNearBottom.current) {
+      setUserScrolling(false);
+    }
+  }, [loading]);
 
   return (
     <div className="flex flex-col space-y-6 pt-8 pb-44 lg:pb-32 sm:mx-4 md:mx-8">

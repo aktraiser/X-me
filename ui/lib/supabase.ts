@@ -1,5 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 import { getSupabaseUrl, getSupabaseKey } from '@/lib/config';
+import { Expert } from '@/lib/actions';
 
 const supabaseUrl = getSupabaseUrl();
 const supabaseKey = getSupabaseKey();
@@ -9,6 +10,33 @@ if (!supabaseUrl || !supabaseKey) {
 }
 
 export const supabase = createClient(supabaseUrl, supabaseKey);
+
+// Fonction pour formater l'URL de l'expert
+export const formatExpertUrl = (expert: any): Expert => {
+  const baseUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
+  return {
+    ...expert,
+    url: `${baseUrl}/expert/${expert.prenom.toLowerCase()}-${expert.nom.toLowerCase()}-${expert.id_expert}`.replace(/\s+/g, '-')
+  };
+};
+
+// Fonction pour récupérer les experts avec l'URL formatée
+export async function getExperts(query?: any) {
+  try {
+    const { data, error } = await supabase
+      .from('experts')
+      .select('*')
+      .match(query || {});
+
+    if (error) throw error;
+
+    // Formater les URLs pour chaque expert
+    return data?.map(formatExpertUrl) || [];
+  } catch (error) {
+    console.error('Error fetching experts:', error);
+    return [];
+  }
+}
 
 // Fonction de test de connexion
 export async function checkSupabaseConnection() {
@@ -58,5 +86,25 @@ export async function uploadExpertImage(file: File, expertId: string) {
   } catch (error) {
     console.error('Error uploading image:', error);
     throw error;
+  }
+}
+
+// Fonction pour récupérer un expert par son ID
+export async function getExpertById(expertId: string) {
+  try {
+    const { data, error } = await supabase
+      .from('experts')
+      .select('*')
+      .eq('id_expert', expertId)
+      .single();
+
+    if (error) throw error;
+    if (!data) return null;
+
+    // Formater l'URL de l'expert
+    return formatExpertUrl(data);
+  } catch (error) {
+    console.error('Error fetching expert:', error);
+    return null;
   }
 }

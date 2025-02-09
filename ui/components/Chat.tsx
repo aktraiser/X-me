@@ -30,9 +30,6 @@ const Chat = ({
   const [dividerWidth, setDividerWidth] = useState(0);
   const dividerRef = useRef<HTMLDivElement | null>(null);
   const messageEnd = useRef<HTMLDivElement | null>(null);
-  const [userScrolling, setUserScrolling] = useState(false);
-  const lastScrollTop = useRef(0);
-  const isNearBottom = useRef(true);
 
   useEffect(() => {
     const updateDividerWidth = () => {
@@ -51,83 +48,59 @@ const Chat = ({
   });
 
   useEffect(() => {
-    const handleScroll = () => {
-      const scrollTop = window.scrollY;
-      const isScrollingUp = scrollTop < lastScrollTop.current;
-      
-      const windowHeight = window.innerHeight;
-      const documentHeight = document.documentElement.scrollHeight;
-      const scrollPosition = window.scrollY + windowHeight;
-      isNearBottom.current = documentHeight - scrollPosition < 100;
-      
-      if (isScrollingUp) {
-        setUserScrolling(true);
-      }
-      
-      lastScrollTop.current = scrollTop;
-    };
-
-    window.addEventListener('scroll', handleScroll);
-    return () => window.removeEventListener('scroll', handleScroll);
-  }, []);
-
-  useEffect(() => {
-    if (!userScrolling && messageEnd.current && isNearBottom.current) {
-      messageEnd.current.scrollIntoView({ behavior: 'smooth' });
-    }
-
     if (messages.length === 1) {
       document.title = `${messages[0].content.substring(0, 30)} - X-me`;
     }
-  }, [messages, userScrolling]);
-
-  useEffect(() => {
-    if (!loading && isNearBottom.current) {
-      setUserScrolling(false);
-    }
-  }, [loading]);
+  }, [messages]);
 
   return (
-    <div className="flex flex-col space-y-6 pt-8 pb-44 lg:pb-32 sm:mx-4 md:mx-8">
-      {messages.map((msg, i) => {
-        const isLast = i === messages.length - 1;
+    <div className="max-w-[1200px] w-full mx-auto px-4">
+      <div className="flex flex-col space-y-0 mb-32">
+        {messages.map((msg, i) => {
+          const isLast = i === messages.length - 1;
+          const hasContext = msg.sources && msg.sources.length > 0;
 
-        return (
-          <Fragment key={msg.messageId}>
-            <MessageBox
-              key={i}
-              message={msg}
-              messageIndex={i}
-              history={messages}
+          return (
+            <Fragment key={msg.messageId}>
+              <MessageBox
+                key={i}
+                message={msg}
+                messageIndex={i}
+                history={messages}
+                loading={loading}
+                dividerRef={isLast ? dividerRef : undefined}
+                isLast={isLast}
+                rewrite={rewrite}
+                sendMessage={sendMessage}
+              />
+              {!isLast && msg.role === 'assistant' && (
+                <div className="h-px w-full bg-light-secondary dark:bg-dark-secondary mt-4" />
+              )}
+            </Fragment>
+          );
+        })}
+        {loading && !messageAppeared && <MessageBoxLoading />}
+        <div ref={messageEnd} />
+        {dividerWidth > 0 && (
+          <div
+            className="fixed z-40 bottom-24 lg:bottom-10 w-full left-0 lg:left-auto lg:w-[calc(66.5%-2rem)] px-4 lg:px-0"
+            style={{ 
+              maxWidth: '900px',
+              margin: '0 auto',
+              right: messages.length > 0 ? 'auto' : '0'
+            }}
+          >
+            <MessageInput
               loading={loading}
-              dividerRef={isLast ? dividerRef : undefined}
-              isLast={isLast}
-              rewrite={rewrite}
               sendMessage={sendMessage}
+              fileIds={fileIds}
+              setFileIds={setFileIds}
+              files={files}
+              setFiles={setFiles}
             />
-            {!isLast && msg.role === 'assistant' && (
-              <div className="h-px w-full bg-light-secondary dark:bg-dark-secondary" />
-            )}
-          </Fragment>
-        );
-      })}
-      {loading && !messageAppeared && <MessageBoxLoading />}
-      <div ref={messageEnd} className="h-0" />
-      {dividerWidth > 0 && (
-        <div
-          className="bottom-24 lg:bottom-10 fixed z-40"
-          style={{ width: dividerWidth }}
-        >
-          <MessageInput
-            loading={loading}
-            sendMessage={sendMessage}
-            fileIds={fileIds}
-            setFileIds={setFileIds}
-            files={files}
-            setFiles={setFiles}
-          />
-        </div>
-      )}
+          </div>
+        )}
+      </div>
     </div>
   );
 };

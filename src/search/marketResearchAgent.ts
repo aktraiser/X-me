@@ -39,13 +39,8 @@ import { OpenAIEmbeddings } from '@langchain/openai';
 import { EventEmitter } from 'events';
 import { webSearchetudeRetrieverPrompt, webSearchetudeResponsePrompt } from '../prompts/webEtude';
 import { SectorDocumentationResearchChain } from '../chains/sectorDocumentationResearchChain';
-
-// Fonction utilitaire pour nettoyer les chaînes JSON
-const cleanJSONString = (str: string): string => {
-  let cleaned = str.replace(/```json\s*|\s*```/g, '');
-  cleaned = cleaned.replace(/[\x00-\x1F\x7F-\x9F]/g, '');
-  return cleaned.trim();
-};
+// Intégration de la nouvelle chaîne d'analyse financière
+import handleFinancialAnalysis from '../chains/financialAnalysisChain';
 
 export interface MetaSearchAgentType {
   searchAndAnswer: (
@@ -89,12 +84,11 @@ interface SearchResponse {
   illustrationImage?: string;
 }
 
-// Ajouter l'interface pour les métadonnées des documents
 interface DocumentMetadata {
   title?: string;
   source?: string;
   fileId?: string;
-  url?: string; // Ajout de l'url optionnelle
+  url?: string;
 }
 
 interface SearchResult {
@@ -110,6 +104,9 @@ interface SectorResearchMessage {
   type: string;
   sector: string;
   subsector: string | null;
+  region: string;
+  city: string;
+  budget: string;
   query: string;
   documentPath: string;
 }
@@ -118,6 +115,7 @@ interface ChainInput extends BasicChainInput {
   sector?: string;
   subsector?: string;
   docs?: Document[];
+  financialAnalysis?: string;
 }
 
 export class MetaSearchAgent implements MetaSearchAgentType {
@@ -130,6 +128,28 @@ export class MetaSearchAgent implements MetaSearchAgentType {
   constructor(config: Config) {
     this.config = config;
     this.fileIds = [];
+  }
+
+  // Méthode d'extraction des données financières depuis les documents
+  private extractFinancialData(docs: Document[]): string {
+    let financialText = "";
+    docs.forEach(doc => {
+      const lower = doc.pageContent.toLowerCase();
+      if (
+        lower.includes("chiffre d'affaires") ||
+        lower.includes("marge") ||
+        lower.includes("ratio")
+      ) {
+        financialText += doc.pageContent + "\n";
+      }
+    });
+    return financialText || "Aucune donnée financière spécifique trouvée.";
+  }
+
+  private cleanJSONString(str: string): string {
+    let cleaned = str.replace(/```json\s*|\s*```/g, '');
+    cleaned = cleaned.replace(/[\x00-\x1F\x7F-\x9F]/g, '');
+    return cleaned.trim();
   }
 
   private updateMemory(message: BaseMessage) {
@@ -151,30 +171,23 @@ export class MetaSearchAgent implements MetaSearchAgentType {
         const linksOutputParser = new LineListOutputParser({
           key: 'links',
         });
-
         const questionOutputParser = new LineOutputParser({
           key: 'question',
         });
-
         const links = await linksOutputParser.parse(input);
         let question = this.config.summarizer
           ? await questionOutputParser.parse(input)
           : input;
-
         if (question === 'not_needed') {
           return { query: '', docs: [] };
         }
-
         let documents: Document[] = [];
-
-        // Recherche web si activée
         if (this.config.searchWeb) {
           console.log('🔍 Démarrage de la recherche web...');
           const res = await searchSearxng(question, {
             language: 'fr',
             engines: this.config.activeEngines,
           });
-
           documents = res.results.map(
             (result) =>
               new Document({
@@ -193,7 +206,6 @@ export class MetaSearchAgent implements MetaSearchAgentType {
           );
           console.log('🌐 Sources web trouvées:', documents.length);
         }
-
         return { query: question, docs: documents };
       }),
     ]);
@@ -209,26 +221,20 @@ export class MetaSearchAgent implements MetaSearchAgentType {
       RunnableMap.from({
         query: (input: ChainInput) => input.query,
         chat_history: (input: ChainInput) => input.chat_history,
+        // Si des documents sont déjà fournis (issu de la documentation), on les intègre
         docs: RunnableLambda.from(async (input: ChainInput) => {
           console.log('Début de la recherche...');
-          let docs: Document[] = [];
-
-          // Utiliser RAGDocumentChain pour la recherche dans les documents
-          const ragChain = RAGDocumentChain.getInstance();
+          let docs: Document[] = (input.docs && input.docs.length > 0) ? [...input.docs] : [];
           
-          // Utiliser le type 'specific' pour une recherche précise
+          const ragChain = RAGDocumentChain.getInstance();
           const searchChain = ragChain.createSearchChain(llm);
-          const relevantDocs = await searchChain.invoke({
+          const searchChainPromise = searchChain.invoke({
             query: input.query,
             chat_history: input.chat_history,
             type: 'specific'
           });
-
-          // 2. Ensuite chercher les experts si pertinent
-          if (this.config.searchDatabase) {
-            try {
-              console.log('👥 Recherche d\'experts...');
-              const expertResults = await handleExpertSearch(
+          const expertPromise = this.config.searchDatabase
+            ? handleExpertSearch(
                 {
                   query: input.query,
                   chat_history: input.chat_history,
@@ -236,29 +242,30 @@ export class MetaSearchAgent implements MetaSearchAgentType {
                   chatId: 'chat_' + Date.now()
                 },
                 llm
-              );
-
-              if (expertResults.experts.length > 0) {
-                const expertDocs = this.convertExpertsToDocuments(expertResults.experts);
-                docs = [...docs, ...expertDocs];
-              }
-            } catch (error) {
-              console.error('❌ Erreur lors de la recherche d\'experts:', error);
-            }
+              ).catch(error => {
+                console.error('❌ Erreur lors de la recherche d\'experts:', error);
+                return { experts: [] };
+              })
+            : Promise.resolve({ experts: [] });
+          const webPromise = this.config.searchWeb
+            ? this.performWebSearch(input.query).catch(error => {
+                console.error('❌ Erreur lors de la recherche web:', error);
+                return [];
+              })
+            : Promise.resolve([]);
+          const [relevantDocs, expertResults, webResults] = await Promise.all([
+            searchChainPromise,
+            expertPromise,
+            webPromise,
+          ]);
+          if (expertResults && expertResults.experts && expertResults.experts.length > 0) {
+            const expertDocs = this.convertExpertsToDocuments(expertResults.experts);
+            docs = [...docs, ...expertDocs];
           }
-
-          // 3. Enfin, compléter avec la recherche web si nécessaire et si peu de résultats
-          if (this.config.searchWeb) {
-            try {
-              console.log('🌐 Démarrage de la recherche web...');
-              const webResults = await this.performWebSearch(input.query);
-              console.log(`🌐 ${webResults.length} résultats web trouvés`);
-              docs = [...docs, ...webResults];
-            } catch (error) {
-              console.error('❌ Erreur lors de la recherche web:', error);
-            }
+          if (webResults && Array.isArray(webResults)) {
+            console.log(`🌐 ${webResults.length} résultats web trouvés`);
+            docs = [...docs, ...webResults];
           }
-
           console.log('🔍 DEBUG - Avant appel rerankDocs - Mode:', optimizationMode, 'Query:', input.query);
           return this.rerankDocs(
             input.query,
@@ -269,11 +276,6 @@ export class MetaSearchAgent implements MetaSearchAgentType {
             llm
           );
         }).withConfig({ runName: 'FinalSourceRetriever' }),
-      }),
-
-      RunnableMap.from({
-        query: (input: ChainInput) => input.query,
-        chat_history: (input: ChainInput) => input.chat_history,
         sector: (input: ChainInput) => input.sector ?? 'Non spécifié',
         subsector: (input: ChainInput) => input.subsector ?? 'Non spécifié',
         date: () => new Date().toISOString(),
@@ -281,13 +283,20 @@ export class MetaSearchAgent implements MetaSearchAgentType {
           console.log('Préparation du contexte...');
           return this.processDocs(input.docs || []);
         },
-        docs: (input) => input.docs || [],
+        financialAnalysis: (input: ChainInput) => 
+          input.financialAnalysis || "Aucune analyse financière disponible pour ce secteur."
       }),
-
       ChatPromptTemplate.fromMessages([
         ['system', webSearchetudeResponsePrompt],
         new MessagesPlaceholder('chat_history'),
-        ['user', '{context}\n\nSecteur: {sector}\nSous-secteur: {subsector}\n\n{query}'],
+        [
+          'user',
+          '{context}\n\n' +
+          'Analyse financière : {financialAnalysis}\n\n' +
+          'Secteur: {sector}\n' +
+          'Sous-secteur: {subsector}\n\n' +
+          '{query}'
+        ],
       ]),
       llm,
       this.strParser,
@@ -308,9 +317,10 @@ export class MetaSearchAgent implements MetaSearchAgentType {
           type: 'expert',
           expert: true,
           expertData: expert,
-          title: `${expert.specialite} - ${expert.ville}`,
+          title: `${expert.prenom} ${expert.nom} - ${expert.specialite}`,
           url: `/expert/${expert.id_expert}`,
-          image_url: expert.image_url
+          image_url: expert.image_url,
+          score: 0.6
         }
       })
     );
@@ -321,7 +331,6 @@ export class MetaSearchAgent implements MetaSearchAgentType {
       language: 'fr',
       engines: this.config.activeEngines,
     });
-
     return res.results.map(result =>
       new Document({
         pageContent: result.content,
@@ -329,29 +338,24 @@ export class MetaSearchAgent implements MetaSearchAgentType {
           title: result.title,
           url: result.url,
           type: 'web',
+          score: 0.4,
           ...(result.img_src && { img_src: result.img_src }),
-        },
+        }
       })
     );
   }
 
   private processDocs(docs: Document[]) {
-    // Trier les documents par score si disponible
     const sortedDocs = docs.sort(
       (a, b) => (b.metadata?.score || 0) - (a.metadata?.score || 0)
     );
-
-    // Limiter à 5 documents maximum
     const limitedDocs = sortedDocs.slice(0, 5);
-
-    // Limiter la taille de chaque document à 1000 caractères
     return limitedDocs
       .map((doc, index) => {
         const content =
           doc.pageContent.length > 1000
             ? doc.pageContent.substring(0, 1000) + '...'
             : doc.pageContent;
-
         return `${content} [${index + 1}]`;
       })
       .join('\n\n');
@@ -367,16 +371,12 @@ export class MetaSearchAgent implements MetaSearchAgentType {
         event.name === 'FinalSourceRetriever'
       ) {
         const sources = event.data.output;
-
-        // Normaliser les sources pour le frontend
         const normalizedSources =
           sources?.map(source => {
             const isUploadedDoc = source.metadata?.type === 'uploaded';
             const isExpert = source.metadata?.type === 'expert';
             const isWeb = source.metadata?.type === 'web';
             const sourceId = source.metadata?.source;
-
-            // Construire l'URL selon le type de source
             let url;
             if (isUploadedDoc && sourceId) {
               const page = source.metadata?.pageNumber || source.metadata?.page || 1;
@@ -391,8 +391,6 @@ export class MetaSearchAgent implements MetaSearchAgentType {
                 url: url
               });
             }
-
-            // Construire un titre descriptif
             let title = source.metadata?.title || '';
             if (isUploadedDoc && title) {
               const page = source.metadata?.pageNumber || source.metadata?.page || 1;
@@ -400,10 +398,7 @@ export class MetaSearchAgent implements MetaSearchAgentType {
             } else if (isExpert) {
               title = source.metadata?.displayTitle || title;
             }
-
-            // Limiter la taille du contenu pour éviter les erreurs de payload
             const limitedContent = source.pageContent?.substring(0, 1000) || '';
-
             return {
               pageContent: limitedContent,
               metadata: {
@@ -412,8 +407,7 @@ export class MetaSearchAgent implements MetaSearchAgentType {
                 url: url,
                 source: sourceId || (isWeb ? 'web' : undefined),
                 pageNumber: source.metadata?.pageNumber || source.metadata?.page || 1,
-                displayDomain: isUploadedDoc ? 'Document local' : 
-                             isWeb ? new URL(url).hostname.replace('www.', '') : undefined,
+                displayDomain: isUploadedDoc ? 'Document local' : undefined,
                 searchText:
                   source.metadata?.searchText?.substring(0, 200) ||
                   limitedContent.substring(0, 200),
@@ -421,7 +415,7 @@ export class MetaSearchAgent implements MetaSearchAgentType {
                 illustrationImage: source.metadata?.illustrationImage,
                 imageTitle: source.metadata?.imageTitle,
                 favicon: isWeb ? `https://s2.googleusercontent.com/s2/favicons?domain_url=${url}` : source.metadata?.favicon,
-                linkText: isWeb ? 'Voir la page' : 'Voir la source',
+                linkText: isUploadedDoc ? 'Voir le document' : 'Voir la source',
                 expertName: source.metadata?.expertName,
                 fileId: sourceId,
                 page: source.metadata?.pageNumber || source.metadata?.page || 1,
@@ -429,10 +423,8 @@ export class MetaSearchAgent implements MetaSearchAgentType {
               }
             };
           }) || [];
-
         console.log('🔍 Sources normalisées:', normalizedSources.length);
         console.log('🔍 Types de sources:', normalizedSources.map(s => s.metadata.type));
-
         emitter.emit(
           'data',
           JSON.stringify({
@@ -469,7 +461,6 @@ export class MetaSearchAgent implements MetaSearchAgentType {
   ) {
     let fullAssistantResponse = '';
     let hasEmittedSuggestions = false;
-  
     for await (const event of stream) {
       if (event.event === 'on_chain_stream') {
         if (event.name === 'FinalResponseGenerator') {
@@ -483,9 +474,9 @@ export class MetaSearchAgent implements MetaSearchAgentType {
         if (event.name === 'FinalResponseGenerator' && !hasEmittedSuggestions) {
           try {
             const suggestionsPrompt = `
-            Based on this conversation and response, suggest 3 relevant follow-up questions:
+            En te basant sur cette conversation et cette réponse, suggère 3 questions pertinentes de suivi en français :
             "${fullAssistantResponse}"
-            Return only the questions, one per line.`;
+            Retourne uniquement les questions, une par ligne.`;
             
             const suggestionsResponse = await llm.invoke(suggestionsPrompt);
             const suggestions = String(suggestionsResponse.content)
@@ -504,12 +495,10 @@ export class MetaSearchAgent implements MetaSearchAgentType {
                 }
               })
             );
-
             hasEmittedSuggestions = true;
           } catch (error) {
             console.error('❌ Erreur lors de la génération des suggestions:', error);
           }
-
           this.updateMemory(new AIMessage(fullAssistantResponse.trim()));
           emitter.emit('end');
         }
@@ -518,27 +507,24 @@ export class MetaSearchAgent implements MetaSearchAgentType {
           const normalizedSources = sources?.map(source => {
             const isUploadedDoc = source.metadata?.type === 'uploaded';
             const isExpert = source.metadata?.type === 'expert';
+            const isWeb = source.metadata?.type === 'web';
             const pageNumber = source.metadata?.pageNumber || source.metadata?.page || 1;
             const sourceId = source.metadata?.source;
-            
             let url;
             if (isUploadedDoc && sourceId) {
               url = `/api/uploads/${sourceId}/content?page=${pageNumber}`;
             } else if (isExpert) {
               url = source.metadata?.url;
-            } else if (source.metadata?.type === 'web') {
+            } else if (isWeb) {
               url = source.metadata?.url;
             }
-            
             let title = source.metadata?.title || '';
             if (isUploadedDoc && title) {
               title = `${title} - Page ${pageNumber}`;
             } else if (isExpert) {
               title = source.metadata?.displayTitle || title;
             }
-            
             const limitedContent = source.pageContent?.substring(0, 1000) || '';
-            
             return {
               pageContent: limitedContent,
               metadata: {
@@ -552,7 +538,7 @@ export class MetaSearchAgent implements MetaSearchAgentType {
                 expertData: source.metadata?.expertData,
                 illustrationImage: source.metadata?.illustrationImage,
                 imageTitle: source.metadata?.imageTitle,
-                favicon: source.metadata?.favicon,
+                favicon: isWeb ? `https://s2.googleusercontent.com/s2/favicons?domain_url=${url}` : source.metadata?.favicon,
                 linkText: isUploadedDoc ? 'Voir le document' : 'Voir la source',
                 expertName: source.metadata?.expertName,
                 fileId: sourceId,
@@ -561,9 +547,7 @@ export class MetaSearchAgent implements MetaSearchAgentType {
               }
             };
           }) || [];
-
           console.log('🔍 Sources normalisées:', normalizedSources.length);
-          
           emitter.emit(
             'data',
             JSON.stringify({ 
@@ -574,7 +558,7 @@ export class MetaSearchAgent implements MetaSearchAgentType {
             })
           );
         }
-        }
+      }
       else {
         emitter.emit(event.event, event.data);
       }
@@ -597,7 +581,6 @@ export class MetaSearchAgent implements MetaSearchAgentType {
         },
         llm
       );
-
       return expertResults.experts.map(expert => ({
         pageContent: `Expert: ${expert.prenom} ${expert.nom}
         Spécialité: ${expert.specialite}
@@ -613,7 +596,7 @@ export class MetaSearchAgent implements MetaSearchAgentType {
           title: `${expert.prenom} ${expert.nom} - ${expert.specialite}`,
           url: `/expert/${expert.id_expert}`,
           image_url: expert.image_url,
-          score: 0.6 // Score moyen pour les experts
+          score: 0.6
         }
       }));
     } catch (error) {
@@ -629,14 +612,13 @@ export class MetaSearchAgent implements MetaSearchAgentType {
         language: 'fr',
         engines: this.config.activeEngines,
       });
-
       return res.results.map(result => ({
         pageContent: result.content,
         metadata: {
           title: result.title,
           url: result.url,
           type: 'web',
-          score: 0.4, // Score plus faible pour les résultats web
+          score: 0.4,
           ...(result.img_src && { img_src: result.img_src }),
         }
       }));
@@ -656,7 +638,6 @@ export class MetaSearchAgent implements MetaSearchAgentType {
   ) {
     console.log('🔍 Mode d\'optimisation:', optimizationMode);
     console.log('🔍 Query pour la recherche d\'image:', query);
-
     if (optimizationMode === 'balanced' || optimizationMode === 'quality') {
       console.log('🔍 Démarrage de la recherche d\'images...');
       try {
@@ -670,7 +651,6 @@ export class MetaSearchAgent implements MetaSearchAgentType {
         );
         console.log('🔍 Résultat brut de handleImageSearch:', JSON.stringify(images, null, 2));
         console.log('🔍 Images trouvées:', images?.length);
-
         if (images && images.length > 0) {
           console.log('🔍 Première image trouvée:', {
             src: images[0].img_src,
@@ -697,7 +677,6 @@ export class MetaSearchAgent implements MetaSearchAgentType {
     } else {
       console.log('🔍 Mode speed: pas de recherche d\'images');
     }
-
     return docs.slice(0, 15);
   }
 
@@ -717,26 +696,13 @@ export class MetaSearchAgent implements MetaSearchAgentType {
   ) {
     const effectiveMode = 'balanced';
     const emitter = new eventEmitter();
-
     try {
-      // Initialiser le SectorDocumentationResearchChain
       await this.initializeSectorChain(llm, embeddings);
-
-      // Parser le message JSON si c'est une recherche sectorielle
       let messageData: SectorResearchMessage | null = null;
       let sectorDocs: Document[] = [];
-
       try {
-        // Fonction de nettoyage du message pour le JSON
-        const cleanJSONString = (str: string): string => {
-          let cleaned = str.replace(/```json\s*|\s*```/g, '');
-          cleaned = cleaned.replace(/[\x00-\x1F\x7F-\x9F]/g, '');
-          return cleaned.trim();
-        };
-
-        const messageStr = cleanJSONString(message);
+        const messageStr = this.cleanJSONString(message);
         console.log('🔍 Message après nettoyage:', messageStr.substring(0, 100) + '...');
-
         if (messageStr.startsWith('{') && messageStr.endsWith('}')) {
           try {
             messageData = JSON.parse(messageStr);
@@ -746,16 +712,13 @@ export class MetaSearchAgent implements MetaSearchAgentType {
               subsector: messageData?.subsector,
               hasQuery: !!messageData?.query
             });
-            
             if (messageData?.type === 'sector_research' && messageData.sector) {
               console.log('📊 Enrichissement avec documentation sectorielle:', {
                 sector: messageData.sector,
                 subsector: messageData.subsector,
                 query: messageData.query?.substring(0, 50) + '...'
               });
-
               message = messageData.query || message;
-
               if (this.sectorChain && messageData.sector) {
                 sectorDocs = await this.sectorChain.extractSectorInformation({
                   sector: messageData.sector,
@@ -773,14 +736,10 @@ export class MetaSearchAgent implements MetaSearchAgentType {
         console.error('❌ Erreur lors du traitement du message:', error);
         sectorDocs = [];
       }
-
-      // Ajouter le message utilisateur à la mémoire
       this.updateMemory(new HumanMessage(message));
-
-      // Fusionner l'historique
       const mergedHistory: BaseMessage[] = [...this.conversationHistory, ...history];
 
-      // Analyse sophistiquée de la requête avec LLM
+      // Analyse de la requête par le LLM
       const queryAnalysis = await llm.invoke(`Tu es un expert en analyse de requêtes. Examine cette demande et détermine la stratégie de recherche optimale.
 IMPORTANT: Tu dois répondre UNIQUEMENT avec un objet JSON valide, sans aucun texte avant ou après.
 
@@ -789,66 +748,79 @@ Question/Requête: "${message}"
 Documents disponibles: ${sectorDocs.length > 0 ? 'Oui' : 'Non'}
 Secteur: ${messageData?.sector || 'Non spécifié'}
 Sous-secteur: ${messageData?.subsector || 'Non spécifié'}`);
-
       try {
-        const cleanJSON = cleanJSONString(String(queryAnalysis.content));
+        const cleanJSON = this.cleanJSONString(String(queryAnalysis.content));
         const analysis = JSON.parse(cleanJSON);
         console.log('🎯 Analyse de la requête:', analysis);
 
-        // Initialiser le RAG avec les documents sectoriels
+        // Intégration de l'analyse financière si le budget est spécifié
+        if (messageData && messageData.budget) {
+          const extractedFinancialData = this.extractFinancialData(sectorDocs);
+          const externalFinancialData = ""; // Vous pouvez enrichir avec des données externes via API si nécessaire
+          const financialAnalysisInput = {
+            chat_history: mergedHistory,
+            financial_data: extractedFinancialData,
+            external_data: externalFinancialData,
+            business_type: messageData.subsector || messageData.sector,
+            location: `${messageData.city} (${messageData.region})`,
+            budget: messageData.budget
+          };
+          try {
+            const financialAnalysisResult = await handleFinancialAnalysis(financialAnalysisInput, llm);
+            console.log("Analyse financière :", financialAnalysisResult);
+            analysis.financialAnalysis = financialAnalysisResult;
+          } catch (error) {
+            console.error("❌ Erreur lors de l'analyse financière :", error);
+          }
+        }
+
         const ragChain = RAGDocumentChain.getInstance();
-        
         if (sectorDocs.length > 0) {
           try {
             console.log('🔄 Initialisation du vector store avec les documents sectoriels...');
             await ragChain.initializeVectorStoreFromDocuments(sectorDocs, embeddings);
             console.log('✅ Vector store initialisé');
-
-            const relevantDocs = await ragChain.searchSimilarDocuments(message, 10);
-            console.log('📄 Documents pertinents trouvés:', relevantDocs.length);
-
-            // Recherche web si nécessaire
-            let webResults = [];
-            if (analysis.requiresWebSearch) {
-              console.log('🔍 Démarrage de la recherche web...');
-              const res = await searchSearxng(message, {
-                language: 'fr',
-                engines: this.config.activeEngines,
-              });
-
-              webResults = res.results.map(result =>
-                new Document({
-                  pageContent: result.content,
-                  metadata: {
-                    title: result.title,
-                    url: result.url,
-                    type: 'web',
-                    source: 'web',
-                    ...(result.img_src && { img_src: result.img_src }),
-                  },
+            // Lancer en parallèle la recherche vectorielle et la recherche web (si nécessaire)
+            const searchSimilarPromise = ragChain.searchSimilarDocuments(message, 10);
+            const webSearchPromise = analysis.requiresWebSearch
+              ? searchSearxng(message, {
+                  language: 'fr',
+                  engines: this.config.activeEngines,
+                }).catch(error => {
+                  console.error('❌ Erreur lors de la recherche web:', error);
+                  return { results: [] };
                 })
-              );
+              : Promise.resolve({ results: [] });
+            let [relevantDocs, webSearchResult] = await Promise.all([
+              searchSimilarPromise,
+              webSearchPromise,
+            ]);
+            // Si aucun document pertinent n'est trouvé via le vector store, utiliser l'ensemble des documents sectoriels en fallback
+            if (!relevantDocs || relevantDocs.length === 0) {
+              console.log("Aucun document pertinent trouvé via le vector store. Utilisation de tous les documents sectoriels comme fallback.");
+              relevantDocs = sectorDocs;
             }
-
-            // Combinaison des résultats avec priorité
-            const combinedResults = [
-              ...relevantDocs.map(doc => ({
-                ...doc,
+            const webResults = webSearchResult.results.map(result =>
+              new Document({
+                pageContent: result.content,
                 metadata: {
-                  ...doc.metadata,
-                  type: doc.metadata.type || 'sector',
-                  score: 0.9
-                }
-              })),
-              ...webResults.map(doc => ({
-                ...doc,
-                metadata: {
-                  ...doc.metadata,
-                  score: 0.6
-                }
-              }))
-            ];
-
+                  title: result.title,
+                  url: result.url,
+                  type: 'web',
+                  source: 'web',
+                  ...(result.img_src && { img_src: result.img_src }),
+                },
+              })
+            );
+            // On ne garde que les résultats web
+            const combinedResults = webResults.map(doc => ({
+              ...doc,
+              metadata: {
+                ...doc.metadata,
+                score: 0.6
+              }
+            }));
+            console.log('🔍 DEBUG - Avant appel rerankDocs - Mode:', effectiveMode, 'Query:', message);
             const finalResults = await this.rerankDocs(
               message,
               combinedResults,
@@ -857,26 +829,26 @@ Sous-secteur: ${messageData?.subsector || 'Non spécifié'}`);
               effectiveMode,
               llm
             );
-
+            // Modification : passer les documents issus de la recherche (documentation + web) dans le champ "docs"
             const answeringChain = await this.createAnsweringChain(
               llm,
               [],
               embeddings,
               effectiveMode
             );
-
             const stream = answeringChain.streamEvents(
               {
                 chat_history: mergedHistory,
                 query: message,
                 sector: messageData?.sector || '',
-                subsector: messageData?.subsector || ''
+                subsector: messageData?.subsector || '',
+                docs: finalResults,
+                financialAnalysis: analysis.financialAnalysis
               },
               {
                 version: 'v1'
               }
             );
-
             this.handleStreamWithMemory(stream, emitter, llm, message);
           } catch (error) {
             console.error('❌ Erreur lors de la gestion des documents:', error);
@@ -893,7 +865,6 @@ Sous-secteur: ${messageData?.subsector || 'Non spécifié'}`);
       console.error('❌ Erreur:', error);
       await this.handleFallback(llm, message, this.conversationHistory, emitter, [], embeddings, effectiveMode);
     }
-
     return emitter;
   }
 
@@ -912,7 +883,6 @@ Sous-secteur: ${messageData?.subsector || 'Non spécifié'}`);
       embeddings,
       mode
     );
-
     const stream = answeringChain.streamEvents(
       {
         chat_history: history,
@@ -922,24 +892,19 @@ Sous-secteur: ${messageData?.subsector || 'Non spécifié'}`);
         version: 'v1'
       }
     );
-
     this.handleStreamWithMemory(stream, emitter, llm, message);
   }
 
   private async ensureVectorStoreInitialized(documents: Document[], embeddings: Embeddings): Promise<RAGDocumentChain> {
     const ragChain = RAGDocumentChain.getInstance();
-    
     try {
-      // Vérifier si le vectorStore est déjà initialisé avec des documents
       const hasDocuments = ragChain.isInitialized();
-      
       if (!hasDocuments) {
         console.log('🔄 Initialisation du vector store avec les documents...');
         await ragChain.initializeVectorStoreFromDocuments(documents, embeddings);
       } else {
         console.log('✅ Vector store déjà initialisé avec des documents');
       }
-      
       return ragChain;
     } catch (error) {
       console.error('❌ Erreur lors de l\'initialisation du vector store:', error);
@@ -949,7 +914,6 @@ Sous-secteur: ${messageData?.subsector || 'Non spécifié'}`);
 }
 
 export const searchHandlers: Record<string, MetaSearchAgentType> = {
-  // ... existing handlers ...
   legal: {
     searchAndAnswer: async (
       message,
@@ -960,11 +924,8 @@ export const searchHandlers: Record<string, MetaSearchAgentType> = {
       fileIds
     ) => {
       const emitter = new eventEmitter();
-
       try {
-        // Fusionner l'historique si nécessaire
         const mergedHistory: BaseMessage[] = history;
-
         const chain = RAGDocumentChain.getInstance();
         await chain.initializeVectorStoreFromDocuments(
           fileIds.map(fileId => new Document({
@@ -973,21 +934,16 @@ export const searchHandlers: Record<string, MetaSearchAgentType> = {
           })),
           embeddings
         );
-
         const searchChain = chain.createSearchChain(llm);
         const results = await searchChain.invoke({
           query: message,
           chat_history: mergedHistory,
           type: 'legal'
         });
-
-        // Convertir le résultat en objet SearchResponse
         const response: SearchResponse = {
           text: results,
-          sources: [] // Sources vides par défaut
+          sources: []
         };
-
-        // Émettre la réponse
         emitter.emit(
           'data',
           JSON.stringify({
@@ -995,7 +951,6 @@ export const searchHandlers: Record<string, MetaSearchAgentType> = {
             data: response.text
           })
         );
-
         emitter.emit('end');
       } catch (error) {
         emitter.emit(
@@ -1006,7 +961,6 @@ export const searchHandlers: Record<string, MetaSearchAgentType> = {
           })
         );
       }
-
       return emitter;
     }
   },
@@ -1020,7 +974,6 @@ export const searchHandlers: Record<string, MetaSearchAgentType> = {
       fileIds
     ) => {
       const emitter = new eventEmitter();
-
       try {
         const chain = RAGDocumentChain.getInstance();
         await chain.initializeVectorStoreFromDocuments(
@@ -1030,19 +983,16 @@ export const searchHandlers: Record<string, MetaSearchAgentType> = {
           })),
           embeddings
         );
-
         const searchChain = chain.createSearchChain(llm);
         const results = await searchChain.invoke({
           query: message,
           chat_history: history,
           type: 'documents'
         });
-
         const response: SearchResponse = {
           text: results,
           sources: []
         };
-
         emitter.emit(
           'data',
           JSON.stringify({
@@ -1050,7 +1000,6 @@ export const searchHandlers: Record<string, MetaSearchAgentType> = {
             data: response.text
           })
         );
-
         emitter.emit('end');
       } catch (error) {
         emitter.emit(
@@ -1061,7 +1010,6 @@ export const searchHandlers: Record<string, MetaSearchAgentType> = {
           })
         );
       }
-
       return emitter;
     }
   },
@@ -1075,70 +1023,52 @@ export const searchHandlers: Record<string, MetaSearchAgentType> = {
       fileIds
     ) => {
       const emitter = new eventEmitter();
-
       try {
-        // Analyse du type de requête avec LLM pour plus de précision
         const queryIntent = await llm.invoke(`
           Analysez cette requête et déterminez son intention principale :
           1. SUMMARY (demande de résumé ou synthèse globale)
           2. ANALYSIS (demande d'analyse ou d'explication)
           3. SPECIFIC (question spécifique sur le contenu)
           4. COMPARE (demande de comparaison)
-
           Requête : "${message}"
-          
           Répondez uniquement avec l'intention.
         `);
-
         const intent = String(queryIntent.content).trim();
         console.log('🎯 Intention détectée:', intent);
-
-        // Chargement optimisé des documents
         const docs = await Promise.all(
           fileIds.map(async fileId => {
             const filePath = path.join(process.cwd(), 'uploads', fileId);
             const contentPath = `${filePath}-extracted.json`;
-
             if (!fs.existsSync(contentPath)) {
               throw new Error(`Fichier non trouvé: ${contentPath}`);
             }
-
             const content = JSON.parse(fs.readFileSync(contentPath, 'utf8'));
-
-            // Optimisation : Chunking plus efficace
-            const chunkSize = 1000; // Taille optimale pour le traitement
-            const overlap = 100; // Chevauchement pour maintenir le contexte
-
+            const chunkSize = 1000;
+            const overlap = 100;
             const chunks: string[] = [];
             let currentChunk = '';
             let currentSize = 0;
-
             content.contents.forEach((text: string) => {
               currentChunk += text + ' ';
               currentSize += text.length;
-
               if (currentSize >= chunkSize) {
                 chunks.push(currentChunk);
-                // Garder le chevauchement pour le prochain chunk
                 currentChunk = currentChunk.slice(-overlap);
                 currentSize = overlap;
               }
             });
-
             if (currentChunk) {
               chunks.push(currentChunk);
             }
-
             return chunks.map((chunk, index) => {
               const pageNumber = Math.floor(index / (chunks.length / (content.pageCount || 1))) + 1;
-
               return new Document({
                 pageContent: chunk,
                 metadata: {
                   title: content.title || 'Document sans titre',
                   source: fileId,
                   type: 'uploaded',
-                  url: `/viewer/${fileId}?page=${pageNumber}`, // URL vers le viewer Next.js
+                  url: `/viewer/${fileId}?page=${pageNumber}`,
                   pageNumber: pageNumber,
                   chunkIndex: index,
                   totalChunks: chunks.length,
@@ -1151,15 +1081,11 @@ export const searchHandlers: Record<string, MetaSearchAgentType> = {
             });
           })
         );
-
         const flatDocs = docs.flat();
         console.log('📚 Nombre total de chunks:', flatDocs.length);
-
         const ragChain = RAGDocumentChain.getInstance();
         await ragChain.initializeVectorStoreFromDocuments(flatDocs, embeddings);
         const chain = ragChain.createSearchChain(llm);
-
-        // Adaptation de la requête selon l'intention détectée par le LLM
         let queryPrompt = message;
         switch (intent) {
           case 'SUMMARY':
@@ -1170,15 +1096,12 @@ export const searchHandlers: Record<string, MetaSearchAgentType> = {
             queryPrompt = `Analyse en détail les aspects suivants du document concernant : ${message}. Fournis une analyse structurée avec des exemples du texte.`;
             break;
           case 'SPECIFIC':
-            // Garde la question originale mais ajoute du contexte
             queryPrompt = `En te basant sur le contenu du document, réponds précisément à cette question : ${message}`;
             break;
           case 'COMPARE':
             queryPrompt = `Compare et analyse en détail les différents aspects concernant : ${message}. Structure ta réponse par points de comparaison.`;
             break;
         }
-
-        // Stream optimisé avec émission rapide des sources
         const stream = await chain.streamEvents(
           {
             query: queryPrompt,
@@ -1187,8 +1110,6 @@ export const searchHandlers: Record<string, MetaSearchAgentType> = {
           },
           { version: 'v1' }
         );
-
-        // Gestion optimisée du stream
         let sourcesEmitted = false;
         for await (const event of stream) {
           if (event.event === 'on_chain_stream') {
@@ -1200,8 +1121,6 @@ export const searchHandlers: Record<string, MetaSearchAgentType> = {
               })
             );
           }
-
-          // Émettre les sources plus tôt dans le processus
           if (!sourcesEmitted && event.event === 'on_chain_start') {
             const sources = flatDocs.slice(0, 5).map(doc => ({
               title: doc.metadata?.title || '',
@@ -1211,7 +1130,6 @@ export const searchHandlers: Record<string, MetaSearchAgentType> = {
               type: 'uploaded',
               pageNumber: doc.metadata?.pageNumber
             }));
-
             emitter.emit(
               'data',
               JSON.stringify({
@@ -1221,7 +1139,6 @@ export const searchHandlers: Record<string, MetaSearchAgentType> = {
             );
             sourcesEmitted = true;
           }
-
           if (event.event === 'on_chain_end') {
             emitter.emit('end');
           }
@@ -1236,7 +1153,6 @@ export const searchHandlers: Record<string, MetaSearchAgentType> = {
           })
         );
       }
-
       return emitter;
     }
   }
